@@ -1,0 +1,13 @@
+Lucenia Native XTree
+Copyright © 2025 Lucenia, Inc.
+
+This product includes software developed by Lucenia, Inc. as part of the Lucenia project (https://lucenia.io).
+
+The native XTree component is a source-available spatial and multi-dimensional indexing engine licensed under the Server Side Public License (SSPL) v1.
+
+This NOTICE file is provided for informational purposes only and is not a license. The terms for copying, modification, and redistribution are stated in the LICENSE file.
+
+Unless you have received a commercial license agreement from Lucenia, Inc., you may not use this software in a service offering without making the source code of your entire service stack available under the SSPL.
+
+This software may include dependencies under other open source licenses. Please refer to the respective licenses in the `third-party/` or `LICENSES/` directories where applicable.
+
