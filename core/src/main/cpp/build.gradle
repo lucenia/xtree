@@ -1,0 +1,72 @@
+/*
+ * SPDX-License-Identifier: SSPL-1.0
+ *
+ * The Lucenia project is source-available software: you can
+ * redistribute it and/or modify it under the terms of the
+ * Server Side Public License, version 1, as published by
+ * MongoDB, Inc.
+ *
+ * As per the terms of the Server Side Public License, if you
+ * make the functionality of this program or a modified version
+ * available over a network, you must make the source code
+ * available for download.
+ *
+ * The full text of the Server Side Public License, version 1,
+ * can be found at:
+ * https://www.mongodb.com/licensing/server-side-public-license
+ */
+
+def nativeBuildDir = "${rootProject.projectDir}/build/native"
+
+task configureNative(type: Exec) {
+    group = "native"
+    description = "Run cmake to configure the native C++ XTree build"
+
+    doFirst {
+        file(nativeBuildDir).mkdirs()
+    }
+
+    workingDir nativeBuildDir
+    def cmakeArgs = [
+        'cmake',
+        "${project.projectDir}",
+        "-DCMAKE_BUILD_TYPE=Release"
+    ]
+
+    if (project.hasProperty("versionSuffixOverride")) {
+        cmakeArgs += "-DVERSION_SUFFIX_OVERRIDE=${project.versionSuffixOverride}"
+    }
+
+    commandLine cmakeArgs
+}
+
+task compileNative(type: Exec) {
+    group = "native"
+    description = "Compile the native XTree shared library"
+    dependsOn configureNative
+    workingDir nativeBuildDir
+    commandLine 'cmake', '--build', '.'
+}
+
+task buildNative(dependsOn: compileNative) {
+    group = "build"
+    description = "Build (configure + compile) native C++ XTree"
+}
+
+task cleanNative(type: Delete) {
+    group = "native"
+    description = "Clean the native CMake build directory"
+    delete file("${rootProject.projectDir}/build/native")
+}
+
+task buildNativeAll {
+    group = "native"
+    description = "Full build: clean, configure, and compile"
+    dependsOn cleanNative, buildNative
+}
+
+// Hook into the top-level build lifecycle
+tasks.named('build') {
+    dependsOn 'buildNative'
+}
+

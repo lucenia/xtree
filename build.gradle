@@ -1,0 +1,78 @@
+/*
+ * SPDX-License-Identifier: SSPL-1.0
+ *
+ * The Lucenia project is source-available software: you can
+ * redistribute it and/or modify it under the terms of the
+ * Server Side Public License, version 1, as published by
+ * MongoDB, Inc.
+ *
+ * As per the terms of the Server Side Public License, if you
+ * make the functionality of this program or a modified version
+ * available over a network, you must make the source code
+ * available for download.
+ *
+ * The full text of the Server Side Public License, version 1,
+ * can be found at:
+ * https://www.mongodb.com/licensing/server-side-public-license
+ */
+
+def printBuildBanner() {
+    def os = "${System.getProperty("os.name")} ${System.getProperty("os.version")} (${System.getProperty("os.arch")})"
+    def jdkVersion = "${System.getProperty("java.version")}"
+    def jdkVendor = "${System.getProperty("java.vendor")}"
+    def javaHome = System.getenv("JAVA_HOME") ?: "Not Set"
+    def gradleVersion = gradle.gradleVersion
+    def seed = new Random().nextLong().toString(16).toUpperCase()
+
+    def cmakeVersion = "unknown"
+    try {
+        def proc = ['cmake', '--version'].execute()
+        def output = proc.text.readLines()
+        if (!output.isEmpty()) {
+            cmakeVersion = output[0].trim()
+        }
+    } catch (Exception ignored) {
+        cmakeVersion = "(not found)"
+    }
+
+    println """
+=======================================
+Lucenia Build Hamster says Hello!
+  Gradle Version        : ${gradleVersion}
+  OS Info               : ${os}
+  JDK Version           : ${jdkVersion} (${jdkVendor})
+  JAVA_HOME             : ${javaHome}
+  CMake Version         : ${cmakeVersion}
+  Random Testing Seed   : ${seed}
+  In FIPS 140 mode      : false
+=======================================
+"""
+}
+
+gradle.taskGraph.whenReady {
+    printBuildBanner()
+}
+
+allprojects {
+    repositories {
+        mavenCentral()
+    }
+}
+
+// Include the native subproject and hook into Gradle's build lifecycle
+subprojects {
+    apply plugin: 'base'
+
+    // Wire native build into Gradle lifecycle
+    tasks.named('build') {
+        if (project.name == 'cpp') {
+            dependsOn 'buildNative'
+        }
+    }
+
+    // Wire native clean into Gradle lifecycle
+    tasks.named("clean") {
+        dependsOn(":core:src:main:cpp:cleanNative")
+    }
+
+}
