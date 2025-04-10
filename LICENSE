@@ -1,0 +1,18 @@
+Server Side Public License (SSPL) Version 1
+
+This project, including the native XTree implementation for Lucenia, is licensed under the Server Side Public License, version 1, as published by MongoDB, Inc.
+
+You may use, modify, and redistribute the source code under the terms of the SSPL, provided that:
+
+1. If you offer the functionality of this project, or a modified version of it, as a service to third parties, you must make the complete source code of your service available under the SSPL.
+2. You must retain this license file and the copyright notice in all copies or substantial portions of the software.
+
+This license applies to this repository only and does not imply that all Lucenia components are licensed under the SSPL. Please refer to individual repositories or modules for their specific licensing terms.
+
+Commercial licensing and enterprise support are available from Lucenia, Inc.
+
+For the full license text, see:
+https://www.mongodb.com/licensing/server-side-public-license
+
+SPDX-License-Identifier: SSPL-1.0
+
