@@ -1,17 +1,17 @@
-// -----------------------------------------------------------------------------
-// SPDX-License-Identifier: SSPL-1.0
-//
-// The Lucenia project is source-available software: you can redistribute it
-// and/or modify it under the terms of the Server Side Public License, version 1,
-// as published by MongoDB, Inc.
-//
-// As per the terms of the SSPL, if you make the functionality of this program
-// or a modified version available to third parties as a service, you must make
-// the source code available under this license.
-//
-// The full text of the Server Side Public License can be found at:
-// https://www.mongodb.com/licensing/server-side-public-license
-// -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# SPDX-License-Identifier: SSPL-1.0
+#
+# The Lucenia project is source-available software: you can redistribute it
+# and/or modify it under the terms of the Server Side Public License, version 1,
+# as published by MongoDB, Inc.
+#
+# As per the terms of the SSPL, if you make the functionality of this program
+# or a modified version available to third parties as a service, you must make
+# the source code available under this license.
+#
+# The full text of the Server Side Public License can be found at:
+# https://www.mongodb.com/licensing/server-side-public-license
+# -----------------------------------------------------------------------------
 
 cmake_minimum_required(VERSION 3.14)
 
@@ -19,6 +19,17 @@ cmake_minimum_required(VERSION 3.14)
 
 # Load version properties
 set(PROJECT_ROOT ${CMAKE_SOURCE_DIR}/../../../..)
+
+# Confirm expected cmake helper exists before include
+set(READ_PROPS_PATH "${CMAKE_SOURCE_DIR}/cmake/read_properties.cmake")
+
+if(EXISTS "${READ_PROPS_PATH}")
+    message(STATUS "Including: ${READ_PROPS_PATH}")
+    include(${READ_PROPS_PATH})
+else()
+    message(FATAL_ERROR "Missing file: ${READ_PROPS_PATH}")
+endif()
+
 include(${CMAKE_SOURCE_DIR}/cmake/read_properties.cmake)
 load_properties_file(${PROJECT_ROOT}/buildSrc/version.properties VERSION)
 
@@ -104,9 +115,13 @@ set(LIBRARY_OUTPUT_NAME "XTree-${PLATFORM_NAME}-${FULL_VERSION}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+endif()
+
 # Source files
 file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
-    RELATIVE ${CMAKE_SOURCE_DIR}
+    # RELATIVE ${CMAKE_SOURCE_DIR}
     *.cpp
 )
 
@@ -114,11 +129,28 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
 list(FILTER SRC_FILES EXCLUDE REGEX "test/.*")
 list(FILTER SRC_FILES EXCLUDE REGEX "test1.cpp")
 
+# --- Optional for IDEs like Qt Creator ---
+if(SRC_FILES)
+    source_group(TREE "${CMAKE_SOURCE_DIR}" FILES ${SRC_FILES})
+endif()
+
+
+# Add source group for IDEs like Qt Creator
+source_group("Source Files" FILES ${SRC_FILES})
+
 # Include paths
 include_directories(
     ${CMAKE_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/third-party
 )
+
+# Test target
+file(GLOB TEST_SOURCES test/*.cpp)
+source_group("Tests" FILES ${TEST_SOURCES})
+
+if(TEST_SOURCES)
+    source_group("Tests" FILES ${TEST_SOURCES})
+endif()
 
 # JNI
 find_package(Java REQUIRED)

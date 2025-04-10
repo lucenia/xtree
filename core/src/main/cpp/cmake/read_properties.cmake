@@ -1,17 +1,17 @@
-// -----------------------------------------------------------------------------
-// SPDX-License-Identifier: SSPL-1.0
-//
-// The Lucenia project is source-available software: you can redistribute it
-// and/or modify it under the terms of the Server Side Public License, version 1,
-// as published by MongoDB, Inc.
-//
-// As per the terms of the SSPL, if you make the functionality of this program
-// or a modified version available to third parties as a service, you must make
-// the source code available under this license.
-//
-// The full text of the Server Side Public License can be found at:
-// https://www.mongodb.com/licensing/server-side-public-license
-// -----------------------------------------------------------------------------
+ # -----------------------------------------------------------------------------
+ # SPDX-License-Identifier: SSPL-1.0
+ #
+ # The Lucenia project is source-available software: you can redistribute it
+ # and/or modify it under the terms of the Server Side Public License, version 1,
+ # as published by MongoDB, Inc.
+ #
+ # As per the terms of the SSPL, if you make the functionality of this program
+ # or a modified version available to third parties as a service, you must make
+ # the source code available under this license.
+ #
+ # The full text of the Server Side Public License can be found at:
+ # https://www.mongodb.com/licensing/server-side-public-license
+ # -----------------------------------------------------------------------------
 
 function(load_properties_file FILEPATH PREFIX)
     file(READ "${FILEPATH}" FILE_CONTENTS)
