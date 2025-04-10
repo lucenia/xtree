@@ -30,6 +30,10 @@ gradle/wrapper/gradle-wrapper.jar
 *.iml
 .vscode/
 *.swp
+# Qt Creator IDE-specific files
+*.user
+*.user.*
+CMakeLists.txt.user
 
 # OS junk
 .DS_Store
