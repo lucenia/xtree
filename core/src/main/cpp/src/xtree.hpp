@@ -175,8 +175,6 @@ namespace xtree {
                 retVal =  (XTreeBucket<RecordType>*)((*std::min_element(this->_children.begin(), (this->_children.begin()+this->_n),
                     SortKeysByOverlapEnlargement<RecordType>(record->getKey(), this->_children.begin(), (this->_children.begin()+this->_n))))->getRecord(_idx->getCache()));
 
-//            cout << GetTimeMicro64() - before << " HERE IS HOW LONG IT TAKES SUCKAS!!!!!!!!!!!!!!!!!!!!!!!!" << endl;
-
             return retVal;
         }
 
@@ -192,7 +190,7 @@ namespace xtree {
         XTreeBucket<RecordType>* retBucket = (XTreeBucket<RecordType>*)((*std::min_element(this->_children.begin(), this->_children.begin()+this->_n,
                   SortKeysByAreaEnlargement<RecordType>(record->getKey(), &hasZeroEnlargement)))->getRecord(_idx->getCache()));
 //        if(hasZeroEnlargement)
-//            cout << "WOOT WOOT ZERO ENLARGEMENT BITCHES **************************************************" << endl;
+//            cout << "WOOT WOOT ZERO ENLARGEMENT **************************************************" << endl;
         return retBucket;
     }
 
