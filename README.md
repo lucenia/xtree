@@ -1,6 +1,6 @@
 # Lucenia XTree
 
-Lucenia XTree is a native C++ spatial index library used as part of the Lucenia stack. It supports advanced geospatial indexing and search performance with versioned shared library builds.
+Lucenia XTree is a native C++ dimensional index library used as part of the Lucenia stack. It supports advanced numeric, spatial, and vector indexing and search performance with versioned shared library builds. It provides consistent and predictive logarithmic performance over BKD with memory safety guarantees; far outperforming current lucene numeric indexing.
 
 ---
 
