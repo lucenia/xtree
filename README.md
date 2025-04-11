@@ -116,7 +116,7 @@ For Ubuntu/Debian-based systems:
 
 ```bash
 sudo apt install build-essential cmake libboost-all-dev default-jdk
-
+```
 
 ---
 
