@@ -96,6 +96,16 @@ endif()
 set(FULL_VERSION "${BASE_VERSION}${VERSION_SUFFIX}")
 project(XTree VERSION ${BASE_VERSION} LANGUAGES CXX)
 
+# Log compiler info
+execute_process(
+    COMMAND ${CMAKE_CXX_COMPILER} --version
+    OUTPUT_VARIABLE COMPILER_VERSION_INFO
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+message(STATUS "Using C++ compiler: ${CMAKE_CXX_COMPILER}")
+message(STATUS "Compiler version: ${COMPILER_VERSION_INFO}")
+
 # ---- C++ and platform setup ----
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -124,6 +134,10 @@ file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
     # RELATIVE ${CMAKE_SOURCE_DIR}
     *.cpp
 )
+file(GLOB_RECURSE HEADER_FILES CONFIGURE_DEPENDS
+    *.h
+    *.hpp
+)
 
 # Exclude test files and test1.cpp from library
 list(FILTER SRC_FILES EXCLUDE REGEX "test/.*")
@@ -134,9 +148,14 @@ if(SRC_FILES)
     source_group(TREE "${CMAKE_SOURCE_DIR}" FILES ${SRC_FILES})
 endif()
 
+if(HEADER_FILES)
+    source_group(TREE "${CMAKE_SOURCE_DIR}" FILES ${HEADER_FILES})
+endif()
+
 
 # Add source group for IDEs like Qt Creator
 source_group("Source Files" FILES ${SRC_FILES})
+source_group("Header Files" FILES ${HEADER_FILES})
 
 # Include paths
 include_directories(
@@ -164,7 +183,7 @@ link_directories(${Boost_LIBRARY_DIRS})
 
 # Shared library target
 if(SRC_FILES)
-add_library(XTree SHARED ${SRC_FILES})
+add_library(XTree SHARED ${SRC_FILES} ${HEADER_FILES})
 
 if(DEFINED LIBRARY_OUTPUT_NAME AND DEFINED BASE_VERSION AND DEFINED VERSION_MAJOR)
     set_target_properties(XTree PROPERTIES
