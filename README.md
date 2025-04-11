@@ -98,6 +98,26 @@ lucenia = 0.5.0
 
 That value drives all version resolution (alongside Git).
 
+
+**Development Requirements**
+
+To build the Lucenia XTree native extension, ensure the following are installed:
+
+- C++17 compatible compiler (e.g., `g++` ≥ 7)
+- CMake ≥ 3.14
+- Boost libraries:
+  - `libboost-system`
+  - `libboost-filesystem`
+  - `libboost-thread`
+  - `libboost-iostreams`
+- JNI headers (typically provided by the JDK)
+
+For Ubuntu/Debian-based systems:
+
+```bash
+sudo apt install build-essential cmake libboost-all-dev default-jdk
+
+
 ---
 
 For more information on Lucenia, visit [https://lucenia.io](https://lucenia.io).
