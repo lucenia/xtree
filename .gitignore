@@ -39,6 +39,8 @@ obj/
 .idea/
 *.iml
 .vscode/
+# But keep GitHub workflows
+!.github/
 *.swp
 *.swo
 *~

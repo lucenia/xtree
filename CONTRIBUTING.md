@@ -15,7 +15,7 @@ To build Lucenia XTree, ensure the following are installed:
   - `libboost-filesystem`
   - `libboost-thread`
   - `libboost-iostreams`
-- **JDK** ≥ 11 (for JNI headers)
+- **JDK** ≥ 21 (for JNI headers)
 - **Google Test** (automatically downloaded during build)
 
 #### Platform-specific Installation
@@ -27,7 +27,7 @@ sudo apt install build-essential cmake libboost-all-dev default-jdk
 
 **macOS (Homebrew):**
 ```bash
-brew install cmake boost openjdk
+brew install cmake boost openjdk@21
 ```
 
 **Windows:**

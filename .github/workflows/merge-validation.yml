@@ -1,0 +1,216 @@
+name: Merge Validation
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  workflow_dispatch:
+
+jobs:
+  full-validation:
+    name: Full Validation Suite
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        build-type: [Release, Debug]
+        include:
+          - os: ubuntu-latest
+            cmake-generator: "Unix Makefiles"
+          - os: macos-latest
+            cmake-generator: "Unix Makefiles"
+          - os: windows-latest
+            cmake-generator: "MinGW Makefiles"
+    
+    runs-on: ${{ matrix.os }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for version calculation
+      
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libboost-all-dev valgrind
+      
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew update
+          brew install cmake boost
+      
+      - name: Install dependencies (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+          choco install mingw
+          choco install boost-msvc-14.3
+      
+      - name: Verify Gradle wrapper
+        run: ./gradlew verifyWrapper --no-daemon
+      
+      - name: Clean build
+        run: ./gradlew clean --no-daemon
+      
+      - name: Build with Gradle
+        run: ./gradlew build --no-daemon
+        env:
+          CMAKE_BUILD_TYPE: ${{ matrix.build-type }}
+          CMAKE_GENERATOR: ${{ matrix.cmake-generator }}
+      
+      - name: Run all tests with coverage
+        run: ./gradlew test --no-daemon
+        env:
+          CMAKE_BUILD_TYPE: ${{ matrix.build-type }}
+      
+      - name: Run memory tests (Linux only)
+        if: matrix.os == 'ubuntu-latest' && matrix.build-type == 'Debug'
+        run: |
+          valgrind --leak-check=full --track-origins=yes --error-exitcode=1 \
+            ./build/native/bin/xtree_tests --gtest_filter=-*Performance*
+      
+      - name: Build snapshot version
+        run: ./gradlew buildSnapshot --no-daemon
+      
+      - name: Verify snapshot artifacts
+        run: |
+          ls -la build/native/lib/
+          if ! ls build/native/lib/*SNAPSHOT* > /dev/null 2>&1; then
+            echo "Error: Snapshot artifacts not found"
+            exit 1
+          fi
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}-${{ matrix.build-type }}
+          path: |
+            **/build/test-results/
+            **/build/reports/tests/
+            **/build/native/Testing/
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.os }}-${{ matrix.build-type }}
+          path: |
+            **/build/native/lib/
+            **/build/native/bin/
+
+  integration-tests:
+    name: Integration Tests
+    needs: full-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libboost-all-dev
+      
+      - name: Build library
+        run: ./gradlew :core:src:main:cpp:buildNative --no-daemon
+      
+      - name: Run integration tests
+        run: |
+          ./build/native/bin/xtree_tests --gtest_filter=*Integration* --gtest_repeat=3
+
+  stress-tests:
+    name: Stress Tests
+    needs: full-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libboost-all-dev
+      
+      - name: Build optimized library
+        run: ./gradlew :core:src:main:cpp:buildNative --no-daemon
+        env:
+          CMAKE_BUILD_TYPE: Release
+      
+      - name: Run stress tests
+        run: |
+          # Run performance tests with high load
+          ./build/native/bin/xtree_tests --gtest_filter=*Performance*:*Stress* --gtest_repeat=10
+        timeout-minutes: 30
+
+  release-readiness:
+    name: Release Readiness Check
+    needs: [full-validation, integration-tests, stress-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check version consistency
+        run: |
+          # Check version in version.properties
+          VERSION=$(grep "lucenia" buildSrc/version.properties | cut -d'=' -f2 | tr -d ' ')
+          echo "Version from properties: $VERSION"
+          
+          # Check if we're on a tag
+          if git describe --exact-match --tags HEAD 2>/dev/null; then
+            TAG=$(git describe --exact-match --tags HEAD)
+            echo "Current tag: $TAG"
+            if [ "v$VERSION" != "$TAG" ]; then
+              echo "Error: Version mismatch between properties ($VERSION) and tag ($TAG)"
+              exit 1
+            fi
+          fi
+      
+      - name: Generate release notes
+        run: |
+          echo "## Release Summary" > release-notes.md
+          echo "" >> release-notes.md
+          echo "### Changes since last tag" >> release-notes.md
+          git log $(git describe --tags --abbrev=0 2>/dev/null || echo "")..HEAD --oneline >> release-notes.md || echo "First release" >> release-notes.md
+      
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  notify-success:
+    name: Notify Success
+    needs: [release-readiness]
+    runs-on: ubuntu-latest
+    if: success()
+    steps:
+      - name: Success notification
+        run: |
+          echo "✅ All merge validation checks passed!"
+          echo "The build is ready for production."
