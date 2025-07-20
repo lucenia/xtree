@@ -55,7 +55,13 @@ jobs:
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
           choco install mingw
-          choco install boost-msvc-14.3
+          
+          git clone https://github.com/Microsoft/vcpkg.git C:/vcpkg
+          C:/vcpkg/bootstrap-vcpkg.bat
+          C:/vcpkg/vcpkg.exe install boost-system boost-filesystem boost-thread boost-iostreams --triplet x64-mingw-static
+          
+          echo "BOOST_ROOT=C:/vcpkg/installed/x64-mingw-static" >> $GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
       
       - name: Verify Gradle wrapper
         run: ./gradlew verifyWrapper --no-daemon
@@ -68,11 +74,13 @@ jobs:
         env:
           CMAKE_BUILD_TYPE: ${{ matrix.build-type }}
           CMAKE_GENERATOR: ${{ matrix.cmake-generator }}
+          CMAKE_TOOLCHAIN_FILE: ${{ env.CMAKE_TOOLCHAIN_FILE }}
       
       - name: Run all tests with coverage
         run: ./gradlew test --no-daemon
         env:
           CMAKE_BUILD_TYPE: ${{ matrix.build-type }}
+          CMAKE_TOOLCHAIN_FILE: ${{ env.CMAKE_TOOLCHAIN_FILE }}
       
       - name: Run memory tests (Linux only)
         if: matrix.os == 'ubuntu-latest' && matrix.build-type == 'Debug'

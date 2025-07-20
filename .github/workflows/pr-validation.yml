@@ -61,9 +61,18 @@ jobs:
       - name: Install dependencies (Windows)
         if: matrix.os == 'windows-latest'
         run: |
+          # Install dependencies with Chocolatey
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
           choco install mingw
-          choco install boost-msvc-14.3
+          
+          # Install vcpkg for better Boost support on Windows
+          git clone https://github.com/Microsoft/vcpkg.git C:/vcpkg
+          C:/vcpkg/bootstrap-vcpkg.bat
+          C:/vcpkg/vcpkg.exe install boost-system boost-filesystem boost-thread boost-iostreams --triplet x64-mingw-static
+          
+          # Set environment variables for CMake to find Boost
+          echo "BOOST_ROOT=C:/vcpkg/installed/x64-mingw-static" >> $GITHUB_ENV
+          echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
       
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -74,11 +83,13 @@ jobs:
         run: ./gradlew build -x test --no-daemon
         env:
           CMAKE_GENERATOR: ${{ matrix.cmake-generator }}
+          CMAKE_TOOLCHAIN_FILE: ${{ env.CMAKE_TOOLCHAIN_FILE }}
       
       - name: Run tests
         run: ./gradlew test --no-daemon
         env:
           CMAKE_GENERATOR: ${{ matrix.cmake-generator }}
+          CMAKE_TOOLCHAIN_FILE: ${{ env.CMAKE_TOOLCHAIN_FILE }}
       
       - name: Upload test results
         if: always()

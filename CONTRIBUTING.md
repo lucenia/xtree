@@ -31,9 +31,23 @@ brew install cmake boost openjdk@21
 ```
 
 **Windows:**
-- Install Visual Studio with C++ development tools
-- Install CMake from https://cmake.org
-- Install Boost from https://www.boost.org
+```bash
+# Install dependencies with Chocolatey
+choco install cmake mingw
+
+# Install vcpkg for C++ dependency management
+git clone https://github.com/Microsoft/vcpkg.git C:/vcpkg
+C:/vcpkg/bootstrap-vcpkg.bat
+
+# Install Boost libraries
+C:/vcpkg/vcpkg.exe install boost-system boost-filesystem boost-thread boost-iostreams --triplet x64-mingw-static
+
+# Set environment variables (add to your system PATH)
+set BOOST_ROOT=C:/vcpkg/installed/x64-mingw-static
+set CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+```
+
+Alternatively, you can use Visual Studio with MSVC, but MinGW is recommended for consistency with the CI builds.
 
 ### Building the Project
 
@@ -47,6 +61,8 @@ cd xtree
 # Build the project
 ./gradlew build
 ```
+
+**Note for Windows users:** If you set up vcpkg as described above, the build system will automatically detect and use the `CMAKE_TOOLCHAIN_FILE` environment variable.
 
 #### Build Commands
 

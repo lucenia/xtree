@@ -59,6 +59,8 @@ cd xtree
 ./gradlew test
 ```
 
+**Cross-platform support:** Works on Linux, macOS, and Windows. See [CONTRIBUTING.md](CONTRIBUTING.md) for platform-specific setup instructions.
+
 The build produces a versioned shared library:
 - **Linux**: `libXTree-Linux-x86_64-64-0.5.0.so`
 - **macOS**: `libXTree-Mac_OS_X-x86_64-64-0.5.0.dylib`

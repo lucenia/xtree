@@ -20,6 +20,7 @@
 #include <vector>
 #include <algorithm>
 #include <limits>
+#include <cmath>
 #include "../src/float_utils.h"
 
 using namespace xtree;

@@ -33,6 +33,11 @@ task configureNative(type: Exec) {
         "-DCMAKE_BUILD_TYPE=Release"
     ]
 
+    // Add CMAKE_TOOLCHAIN_FILE if specified (for Windows vcpkg support)
+    if (System.getenv("CMAKE_TOOLCHAIN_FILE")) {
+        cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=${System.getenv("CMAKE_TOOLCHAIN_FILE")}"
+    }
+
     if (project.hasProperty("versionSuffixOverride")) {
         cmakeArgs += "-DVERSION_SUFFIX_OVERRIDE=${project.versionSuffixOverride}"
     } else if (rootProject.hasProperty("versionSuffixOverride")) {
@@ -76,7 +81,19 @@ task configureNativeSnapshot(type: Exec) {
     }
     
     workingDir nativeBuildDir
-    commandLine 'cmake', project.projectDir, "-DCMAKE_BUILD_TYPE=Release", "-DVERSION_SUFFIX_OVERRIDE=-SNAPSHOT"
+    def cmakeArgs = [
+        'cmake', 
+        project.projectDir, 
+        "-DCMAKE_BUILD_TYPE=Release", 
+        "-DVERSION_SUFFIX_OVERRIDE=-SNAPSHOT"
+    ]
+    
+    // Add CMAKE_TOOLCHAIN_FILE if specified (for Windows vcpkg support)
+    if (System.getenv("CMAKE_TOOLCHAIN_FILE")) {
+        cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=${System.getenv("CMAKE_TOOLCHAIN_FILE")}"
+    }
+    
+    commandLine cmakeArgs
 }
 
 task buildSnapshot {
