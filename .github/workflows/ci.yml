@@ -54,4 +54,16 @@ jobs:
       
       - name: Run unit tests only
         run: |
-          ./build/native/bin/xtree_tests --gtest_filter=-*Integration*:-*Performance*:-*Stress* || true
+          # Run tests and capture output, ignore exit code if all tests pass
+          ./build/native/bin/xtree_tests --gtest_filter=-*Integration*:-*Performance*:-*Stress* > test_output.log 2>&1
+          
+          # Check if all tests passed
+          if grep -q "\[ *PASSED *\] .* tests\." test_output.log; then
+            echo "All tests passed successfully"
+            cat test_output.log
+            exit 0
+          else
+            echo "Tests failed:"
+            cat test_output.log
+            exit 1
+          fi

@@ -110,14 +110,22 @@ TEST_F(XTreeBucketTest, MockBucketInsertion) {
     
     // Verify insertion
     EXPECT_EQ(root->n(), 1);
+    
+    // Clean up mock objects
+    delete mockKey;
+    delete mock;
 }
 
 TEST_F(XTreeBucketTest, MockMultipleInsertions) {
     const int NUM_RECORDS = 5;
+    vector<MockRecord*> mocks;
+    vector<KeyMBR*> mockKeys;
     
     for (int i = 0; i < NUM_RECORDS; ++i) {
         auto* mock = new MockRecord();
         auto* mockKey = new KeyMBR(2, 32);
+        mocks.push_back(mock);
+        mockKeys.push_back(mockKey);
         
         // Expand the key to have different bounds for each record
         vector<double> minPoint = {i * 10.0, i * 10.0};
@@ -140,15 +148,27 @@ TEST_F(XTreeBucketTest, MockMultipleInsertions) {
     }
     
     EXPECT_EQ(root->n(), NUM_RECORDS);
+    
+    // Clean up mock objects
+    for (auto* mockKey : mockKeys) {
+        delete mockKey;
+    }
+    for (auto* mock : mocks) {
+        delete mock;
+    }
 }
 
 TEST_F(XTreeBucketTest, MockInsertionWithSplitScenario) {
     // Insert enough records to potentially trigger a split
     const int LARGE_NUM_RECORDS = 50;  // Should be > XTREE_M
+    vector<MockRecord*> mocks;
+    vector<KeyMBR*> mockKeys;
     
     for (int i = 0; i < LARGE_NUM_RECORDS; ++i) {
         auto* mock = new MockRecord();
         auto* mockKey = new KeyMBR(2, 32);
+        mocks.push_back(mock);
+        mockKeys.push_back(mockKey);
         
         // Create spatially distributed points
         double angle = (2.0 * M_PI * i) / LARGE_NUM_RECORDS;
@@ -171,4 +191,12 @@ TEST_F(XTreeBucketTest, MockInsertionWithSplitScenario) {
     // After many insertions, the tree structure should have grown
     EXPECT_GE(root->n(), 1);  // Root should have at least one child
     EXPECT_GT(root->memoryUsage(), sizeof(XTreeBucket<MockRecord>));
+    
+    // Clean up mock objects
+    for (auto* mockKey : mockKeys) {
+        delete mockKey;
+    }
+    for (auto* mock : mocks) {
+        delete mock;
+    }
 }
