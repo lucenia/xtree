@@ -19,6 +19,7 @@
 #pragma once
 
 #include "lru.h"
+#include <algorithm>
 
 namespace xtree {
 
@@ -44,6 +45,11 @@ namespace xtree {
 
         // set the doubly-linked list
         this->_first->next->prev = _first;
+        
+        // Add the new node to _nodes
+        // For performance, we add to the end instead of the beginning
+        // The LRU order is maintained by the linked list, not the vector order
+        this->_nodes.push_back(this->_first);
 
         // if adding a node exceeds memory...
         // we will need to initiate a min compaction

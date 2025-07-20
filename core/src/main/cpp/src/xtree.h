@@ -166,7 +166,7 @@ namespace xtree {
     template< class RecordType >
     class __MBRKeyNode {
     public:
-        typedef LRUCacheNode<IRecord, UniqueId, LRUDeleteObject> CacheNode;
+        typedef LRUCacheNode<IRecord, UniqueId, LRUDeleteNone> CacheNode;
         // reuse 8 bytes for either:
         //   a.  a unique ID for cache to locate the record on "disk"
         //   b.  the memory address of the cached object
@@ -194,7 +194,7 @@ namespace xtree {
         CacheNode* getCacheRecord() { return (_cached) ? _record.address : NULL; }
 
         /** pull the record from cache */
-        IRecord* getRecord(LRUCache<IRecord, UniqueId, LRUDeleteObject> &cache) {
+        IRecord* getRecord(LRUCache<IRecord, UniqueId, LRUDeleteNone> &cache) {
                 return (_cached) ?
                     reinterpret_cast<CacheNode*>(_record.address)->object :
                     cache.get( *(reinterpret_cast<UniqueId*>(&(_record.id))) ); }
@@ -310,6 +310,10 @@ namespace xtree {
         // grant access to privates
         template< class R >
         friend class Iterator;
+        
+        // Grant access to serialization
+        template< class R >
+        friend class XTreeSerializer;
 
         typedef __MBRKeyNode<Record> _MBRKeyNode;
         typedef typename _MBRKeyNode::CacheNode CacheNode;
@@ -319,7 +323,7 @@ namespace xtree {
         XTreeBucket<Record>(IndexDetails<Record>* idx, bool isRoot, KeyMBR* key=NULL, const vector<_MBRKeyNode*>* sourceChildren = NULL,
             unsigned int split_index=0, bool isLeaf=true, unsigned int sourceN=0): IRecord(key),
             _memoryUsage(sizeof(XTreeBucket<Record>)), _idx(idx), _parent(NULL), _nextChild(NULL), _prevChild(NULL),
-            _n(0), _isSupernode(false), _leaf(isLeaf) {
+            _n(0), _isSupernode(false), _leaf(isLeaf), _ownsPreallocatedNodes(sourceChildren==NULL) {
                 // if source children are not provided
                 if(sourceChildren==NULL)
                     generate_n(back_inserter(_children), XTREE_CHILDVEC_INIT_SIZE,
@@ -350,13 +354,16 @@ namespace xtree {
                 delete _parent;
                 _parent = NULL;
             }
-
+            
             // Clean up pre-allocated but unused child nodes
             // These are nodes that were allocated in the constructor but never used
             // (i.e., nodes where index >= _n)
-            for (size_t i = _n; i < _children.size(); i++) {
-                if (_children[i] != NULL) {
-                    delete _children[i];
+            // Only delete them if we created them (not from a split)
+            if (_ownsPreallocatedNodes) {
+                for (size_t i = _n; i < _children.size(); i++) {
+                    if (_children[i] != NULL) {
+                        delete _children[i];
+                    }
                 }
             }
             
@@ -575,6 +582,8 @@ namespace xtree {
         bool _isSupernode;                  // 1 byte
         // internal or leaf node
         bool _leaf;                         // 1 byte
+        // whether this bucket owns its pre-allocated nodes
+        bool _ownsPreallocatedNodes;        // 1 byte
         // in memory child pointers
         vector<_MBRKeyNode*> _children;     // 24 bytes
                                             // 8 bytes from IRecord

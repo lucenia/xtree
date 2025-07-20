@@ -29,7 +29,7 @@
 using namespace xtree;
 using namespace std;
 using ::testing::Return;
-using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>;
+using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>;
 
 // Define a mock Record to insert into the XTree
 class MockRecord : public IRecord {
@@ -44,7 +44,7 @@ public:
 // Initialize static members of IndexDetails for MockRecord
 template<> JNIEnv* IndexDetails<MockRecord>::jvm = nullptr;
 template<> std::vector<IndexDetails<MockRecord>*> IndexDetails<MockRecord>::indexes = std::vector<IndexDetails<MockRecord>*>();
-template<> LRUCache<IRecord, UniqueId, LRUDeleteObject> IndexDetails<MockRecord>::cache(1024*1024*10); // 10MB cache
+template<> LRUCache<IRecord, UniqueId, LRUDeleteNone> IndexDetails<MockRecord>::cache(1024*1024*10); // 10MB cache
 
 class TestableXTreeBucket : public XTreeBucket<MockRecord> {
 public:
@@ -64,7 +64,7 @@ protected:
         // For testing, we create a fake cache node that points to our root
         // but isn't actually in the cache. This avoids memory leaks from the
         // static cache persisting between tests.
-        cachedRoot = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+        cachedRoot = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
             index->getNextNodeID(), static_cast<IRecord*>(root), nullptr);
     }
 
@@ -122,7 +122,7 @@ TEST_F(XTreeBucketTest, MockBucketInsertion) {
     
     // For testing with mocks, we need to create a fake cache node manually
     // instead of using xt_insert which would add the mock to the real cache
-    auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+    auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
         index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
     
     // Use the internal _insert method directly
@@ -167,7 +167,7 @@ TEST_F(XTreeBucketTest, MockMultipleInsertions) {
             .WillRepeatedly(Return(100L));
         
         // Create fake cache node for testing
-        auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+        auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
             index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
         cachedMocks.push_back(cachedMock);
         
@@ -218,7 +218,7 @@ TEST_F(XTreeBucketTest, MockInsertionWithSplitScenario) {
             .WillRepeatedly(Return(100L));
         
         // Create fake cache node for testing
-        auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+        auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
             index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
         cachedMocks.push_back(cachedMock);
         

@@ -29,4 +29,4 @@ using namespace std;
 // DataRecord static members (shared across all test files)
 template<> JNIEnv* IndexDetails<DataRecord>::jvm = nullptr;
 template<> std::vector<IndexDetails<DataRecord>*> IndexDetails<DataRecord>::indexes = std::vector<IndexDetails<DataRecord>*>();
-template<> LRUCache<IRecord, UniqueId, LRUDeleteObject> IndexDetails<DataRecord>::cache(1024*1024*10); // 10MB cache
+template<> LRUCache<IRecord, UniqueId, LRUDeleteNone> IndexDetails<DataRecord>::cache(1024*1024*10); // 10MB cache

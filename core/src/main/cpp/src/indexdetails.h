@@ -100,7 +100,7 @@ namespace xtree {
         }
 
 
-        static LRUCache<IRecord, UniqueId, LRUDeleteObject>& getCache() { return cache; }
+        static LRUCache<IRecord, UniqueId, LRUDeleteNone>& getCache() { return cache; }
         
         // Clear the cache - useful for test cleanup to prevent memory leaks
         static void clearCache() { cache.clear(); }
@@ -137,7 +137,7 @@ namespace xtree {
     private:
         static JNIEnv *jvm;
         static vector<IndexDetails<Record>*> indexes;
-        static LRUCache<IRecord, UniqueId, LRUDeleteObject> cache;
+        static LRUCache<IRecord, UniqueId, LRUDeleteNone> cache;
 
         jobject* _xtPOJO;
         unsigned short _dimension;                              // 2 bytes
@@ -147,6 +147,9 @@ namespace xtree {
         // create the cache for the tree
 //        LRUCache<IRecord, UniqueId, LRUDeleteObject> _cache;    // 48 bytes
         UniqueId _nodeCount;                                    // 8 bytes
+        
+        // Allow factory to initialize static members
+        template<typename R> friend class MMapXTreeFactory;
         vector<Iterator<Record>*> *_iterators;
     }; // TOTAL: 68 bytes
 }

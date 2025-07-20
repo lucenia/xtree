@@ -178,12 +178,40 @@ namespace xtree {
           * adjusts the doubly linked list
           */
          void remove(CachedObjectType *object) {
-        	 typename NodeArray::iterator trgtIter = find(_nodes.begin(), _nodes.end(), object);
-        	 Node* trgt = *trgtIter;
-        	 trgt->object->prev->next = trgt->object->next;
-        	 trgt->object->next->prev = trgt->object->prev;
-
-        	 _nodes.erase(trgtIter);
+             // Find the node that contains this object
+             typename NodeArray::iterator trgtIter = _nodes.begin();
+             for (; trgtIter != _nodes.end(); ++trgtIter) {
+                 if ((*trgtIter)->object == object) {
+                     break;
+                 }
+             }
+             
+             if (trgtIter == _nodes.end()) {
+                 return; // Object not found
+             }
+             
+             Node* trgt = *trgtIter;
+             
+             // Update the doubly-linked list
+             if (trgt->prev) {
+                 trgt->prev->next = trgt->next;
+             } else {
+                 // This was the first node
+                 _first = trgt->next;
+             }
+             
+             if (trgt->next) {
+                 trgt->next->prev = trgt->prev;
+             } else {
+                 // This was the last node
+                 _last = trgt->prev;
+             }
+             
+             // Remove from the vector
+             _nodes.erase(trgtIter);
+             
+             // Delete the node
+             delete trgt;
          }
          
          /**
@@ -191,6 +219,7 @@ namespace xtree {
           * This is useful for test cleanup to prevent memory leaks.
           */
          void clear() {
+             // Delete all nodes in the cache
              NodeIterator i = _nodes.begin();
              const NodeIterator end = _nodes.end();
              for(; i!=end; i++)

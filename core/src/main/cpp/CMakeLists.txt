@@ -271,6 +271,16 @@ include_directories(
 file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
     *.cpp
 )
+
+# Ensure serialization files are explicitly included
+list(APPEND SRC_FILES
+    src/xtree_serialization.cpp
+    src/mmapfile.cpp
+    src/lru_tracker_stub.cpp
+    src/xtree_mmap_stub.cpp
+    src/xtree_mmap_impl.cpp
+    src/xtree_mmap_factory.cpp
+)
 file(GLOB_RECURSE HEADER_FILES CONFIGURE_DEPENDS
     *.h
     *.hpp
@@ -331,6 +341,13 @@ set(GTEST_SOURCES
     test/test_integration.cpp
     test/test_float_utils.cpp
     test/test_performance.cpp
+    test/test_mmapfile.cpp
+    test/test_lru_tracker.cpp
+    test/test_hot_node_detector.cpp
+    test/test_xtree_serialization.cpp
+    test/test_page_cache.cpp
+    test/test_datarecord_serialization.cpp
+    # test/test_mmap_xtree_integration.cpp  # Temporarily disabled until full implementation
 )
 
 add_executable(xtree_tests ${GTEST_SOURCES})
