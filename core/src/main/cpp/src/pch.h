@@ -20,6 +20,9 @@
 
 #pragma once
 
+// Fix for Boost bind deprecation warning
+#define BOOST_BIND_GLOBAL_PLACEHOLDERS
+
 #include <sys/time.h>
 #include <ctime>
 #include <cassert>

@@ -86,8 +86,9 @@ namespace xtree {
             _traversalOrder = static_cast<void*>(sq);
             // pushes the starting node onto the stack/queue
             sq->push(nodeHandle);
-        } else
+        } else {
             sq = static_cast<TraversalOrder*>(_traversalOrder);
+        }
 
         IRecord* rec = NULL;
         int n;
@@ -99,12 +100,16 @@ namespace xtree {
             bool proceed = (this->* visit)(pull(*sq));
             if( proceed ) {
                 // add children if we're not at a data node
-                if(!rec->isDataNode()) {
+                if(rec->isDataNode() == false) {
                     n=0;
                     XTreeBucket<RecordType>* bucket = reinterpret_cast<XTreeBucket<RecordType>*>(rec);
                     for(typename vector<MBRKeyNode*>::const_iterator iter = bucket->getChildren()->begin();
-                        n<bucket->n(); iter++, ++n) {
-                        sq->push( (*iter)->getCacheRecord() );
+                        n<bucket->n(); iter++, ++n
+                    ) {
+                        CacheNode* childNode = (*iter)->getCacheRecord();
+                        if(childNode != NULL) {
+                            sq->push(childNode);
+                        }
                     }
                 }
             }
@@ -113,7 +118,7 @@ namespace xtree {
         // since _traversalOrder is a void pointer you can't guarantee that the
         // referenced object is properly destructed, by deleting sq and resetting
         // _traversalOrder we are ensuring proper cleanup of the {stack|queue}
-        if(!_hasNext) {
+        if(_hasNext == false) {
             delete sq;
             _traversalOrder = NULL;
         }

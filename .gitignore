@@ -1,0 +1,122 @@
+# Gradle
+.gradle/
+build/
+gradle-app.setting
+!gradle-wrapper.jar
+.gradletasknamecache
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+cmake-build-*/
+Makefile
+CTestTestfile.cmake
+Testing/
+_deps/
+*.cmake
+!cmake/*.cmake
+!CMakeLists.txt
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+*.a
+*.lib
+*.exe
+*.out
+*.app
+bin/
+lib/
+obj/
+# But keep scripts
+!*.sh
+!gradlew
+!gradlew.bat
+
+# IDE files
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-*
+
+# OS files
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Test output
+test-results/
+test-output/
+*.log
+*.tmp
+# Test executables
+*_test
+*_tests
+test_*
+!test_*.cpp
+!test_*.h
+
+# Core dumps
+core.*
+*.core
+core.?????
+vgcore.*
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
+*.pdb
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Local configuration
+local.properties
+config.local
+# But keep version.properties and gradle.properties
+!version.properties
+!gradle.properties
+
+# Compiled source
+*.o
+*.obj
+*.class
+
+# Package files
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# Generated files
+generated/
+out/
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Coverage
+*.gcov
+*.gcda
+*.gcno
+coverage/

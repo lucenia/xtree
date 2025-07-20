@@ -465,7 +465,7 @@ namespace xtree {
             visit(cn, &result, arguments);
 
             // if this isn't a data node push all the children
-            if(!rec->isDataNode()) {
+            if(rec->isDataNode() == false) {
                 n=0;
                 XTreeBucket<RecordType>* bucket = reinterpret_cast<XTreeBucket<RecordType>*>(rec);
                 for(typename vector<_MBRKeyNode*>::const_iterator iter = bucket->getChildren()->begin();

@@ -171,15 +171,60 @@ if(TEST_SOURCES)
     source_group("Tests" FILES ${TEST_SOURCES})
 endif()
 
+# Platform-specific setup for finding dependencies
+if(APPLE)
+    # macOS specific paths
+    # Check for Homebrew installations
+    if(EXISTS "/usr/local/opt/boost")
+        set(BOOST_ROOT "/usr/local/opt/boost")
+    elseif(EXISTS "/opt/homebrew/opt/boost")
+        set(BOOST_ROOT "/opt/homebrew/opt/boost")
+    endif()
+    
+    # Set JAVA_HOME if not already set
+    if(NOT DEFINED ENV{JAVA_HOME})
+        execute_process(
+            COMMAND /usr/libexec/java_home
+            OUTPUT_VARIABLE JAVA_HOME_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(JAVA_HOME_PATH)
+            set(ENV{JAVA_HOME} "${JAVA_HOME_PATH}")
+        endif()
+    endif()
+elseif(WIN32)
+    # Windows specific paths
+    # Add common Boost installation paths
+    set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} "C:/local/boost_1_88_0" "C:/boost")
+endif()
+
 # JNI
 find_package(Java REQUIRED)
 find_package(JNI REQUIRED)
 include_directories(${JNI_INCLUDE_DIRS})
 
 # Boost
-find_package(Boost REQUIRED COMPONENTS system filesystem thread iostreams)
-include_directories(${Boost_INCLUDE_DIRS})
-link_directories(${Boost_LIBRARY_DIRS})
+set(Boost_USE_STATIC_LIBS OFF)
+set(Boost_USE_MULTITHREADED ON)
+set(Boost_USE_STATIC_RUNTIME OFF)
+
+# For newer CMake versions, use the new FindBoost approach
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
+    cmake_policy(SET CMP0167 NEW)
+endif()
+
+find_package(Boost 1.58 REQUIRED COMPONENTS system filesystem thread iostreams)
+
+if(Boost_FOUND)
+    message(STATUS "Boost version: ${Boost_VERSION}")
+    message(STATUS "Boost include dirs: ${Boost_INCLUDE_DIRS}")
+    message(STATUS "Boost libraries: ${Boost_LIBRARIES}")
+    include_directories(${Boost_INCLUDE_DIRS})
+    link_directories(${Boost_LIBRARY_DIRS})
+else()
+    message(FATAL_ERROR "Boost not found. Please install Boost libraries.")
+endif()
 
 # Shared library target
 if(SRC_FILES)
@@ -200,12 +245,43 @@ target_link_libraries(XTree
 endif()
 
 
-# Test target
-file(GLOB TEST_SOURCES test/*.cpp)
-if(TEST_SOURCES)
-add_executable(dbtest ${TEST_SOURCES})
-target_link_libraries(dbtest XTree ${Boost_LIBRARIES})
-endif()
+# Google Test setup
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG release-1.12.1
+)
+# For Windows: Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+# Enable testing
+enable_testing()
+
+# Test target with Google Test
+set(GTEST_SOURCES
+    test/test_xtree.cpp
+    test/test_keymbr.cpp
+    test/test_components.cpp
+    test/test_search.cpp
+    test/test_integration.cpp
+    test/test_float_utils.cpp
+    test/test_performance.cpp
+)
+
+add_executable(xtree_tests ${GTEST_SOURCES})
+target_link_libraries(xtree_tests 
+    XTree 
+    ${Boost_LIBRARIES}
+    gtest
+    gtest_main
+    gmock
+)
+
+# Add test discovery
+include(GoogleTest)
+gtest_discover_tests(xtree_tests)
 
 # Install
 if(TARGET XTree)
@@ -214,8 +290,8 @@ install(TARGETS XTree
 )
 endif()
 
-if(TARGET dbtest)
-install(TARGETS dbtest
+if(TARGET xtree_tests)
+install(TARGETS xtree_tests
     RUNTIME DESTINATION bin
 )
 endif()

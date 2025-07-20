@@ -56,25 +56,55 @@ namespace xtree {
      * values for each axis
      */
     void KeyMBR::expandWithPoint(const vector<double>/*const BSONObj*/ *loc) {
-        vector<double>::const_iterator iter = loc->begin();
-
-        for(unsigned short d=0; d<dimension*2; d+=2) {
-            this->_box[d] =  MIN(this->_box[d], (float)(*iter));
-            this->_box[d+1] = MAX(this->_box[d+1],(float)(*iter));
-            iter++;
+        const double* data = loc->data(); // Direct pointer access
+        
+        // Unroll common 2D case
+        if (dimension == 2) {
+            int32_t x = floatToSortableInt((float)data[0]);
+            int32_t y = floatToSortableInt((float)data[1]);
+            this->_box[0] = MIN(this->_box[0], x);
+            this->_box[1] = MAX(this->_box[1], x);
+            this->_box[2] = MIN(this->_box[2], y);
+            this->_box[3] = MAX(this->_box[3], y);
+        } else {
+            // General case
+            for(unsigned short d=0; d<dimension; d++) {
+                int32_t sortableValue = floatToSortableInt((float)data[d]);
+                unsigned short idx = d*2;
+                this->_box[idx] = MIN(this->_box[idx], sortableValue);
+                this->_box[idx+1] = MAX(this->_box[idx+1], sortableValue);
+            }
         }
-////        if(!dirty) dirty = true;
+        // Clear cached area
+        if(_area) {
+            delete _area;
+            _area = NULL;
+        }
     }
 
     /**
      * Expands this MBR given a child MBR (leaf or internal node)
      */
     void KeyMBR::expand(const KeyMBR &mbr) {
-        for(unsigned short d=0; d<dimension*2; d+=2) {
-            this->_box[d] = MIN(this->_box[d], mbr.getBoxVal(d));
-            this->_box[d+1] = MAX(this->_box[d+1], mbr.getBoxVal(d+1));
+        // Unroll common 2D case
+        if (dimension == 2) {
+            // Direct memory access for performance
+            this->_box[0] = MIN(this->_box[0], mbr._box[0]);
+            this->_box[1] = MAX(this->_box[1], mbr._box[1]);
+            this->_box[2] = MIN(this->_box[2], mbr._box[2]);
+            this->_box[3] = MAX(this->_box[3], mbr._box[3]);
+        } else {
+            // General case
+            for(unsigned short d=0; d<dimension*2; d+=2) {
+                this->_box[d] = MIN(this->_box[d], mbr._box[d]);
+                this->_box[d+1] = MAX(this->_box[d+1], mbr._box[d+1]);
+            }
         }
-//        if(!dirty) dirty = true;
+        // Clear cached area
+        if(_area) {
+            delete _area;
+            _area = NULL;
+        }
     }
 
     /**
@@ -223,25 +253,42 @@ namespace xtree {
     double KeyMBR::overlap(const KeyMBR& bb) const {
         double area = -1.0;
         for( unsigned short d=0; d<dimension*2; d+=2 ) {
-            area = abs(area)*MAX(0, (MIN(this->_box[d+1], bb.getBoxVal(d+1)) - MAX(this->_box[d], bb.getBoxVal(d))));
+            // Convert back to float for area calculation
+            float thisMin = sortableIntToFloat(this->_box[d]);
+            float thisMax = sortableIntToFloat(this->_box[d+1]);
+            float bbMin = bb.getMin(d/2);
+            float bbMax = bb.getMax(d/2);
+            area = abs(area)*MAX(0.0f, (MIN(thisMax, bbMax) - MAX(thisMin, bbMin)));
         }
         if(area < 0) area=0.0;
         return area;
     }
 
     bool KeyMBR::intersects(const KeyMBR& bb) const {
+        // Optimize for common 2D case
+        if (dimension == 2 && !this->isPoint()) {
+            // Direct integer comparison with unrolled loop
+            return !(this->_box[1] < bb._box[0] ||  // this.maxX < bb.minX
+                     bb._box[1] < this->_box[0] ||   // bb.maxX < this.minX
+                     this->_box[3] < bb._box[2] ||   // this.maxY < bb.minY
+                     bb._box[3] < this->_box[2]);    // bb.maxY < this.minY
+        }
+        
         if(this->isPoint()) {
             // check that each dimension is contained
             for( unsigned short d=0; d<bb.getDimensionCount()*2; d+=2 ) {
-                if( !((this->_box[d]>=bb.getBoxVal(d)) &&
-                    (this->_box[d+1]<=bb.getBoxVal(d+1))) ) {
+                // Direct integer comparison - no epsilon needed
+                if( !((this->_box[d]>=bb._box[d]) &&
+                    (this->_box[d+1]<=bb._box[d+1])) ) {
                     return false;
                 }
             }
         } else {
             // check that the hyperpoly intersects
             for( unsigned short d=0; d<bb.getDimensionCount()*2; d+=2 ) {
-                if(!(MAX(0, (MIN(this->_box[d+1], bb.getBoxVal(d+1)) - MAX(this->_box[d], bb.getBoxVal(d))))>0.0)) {
+                // Direct integer comparison - if max < min, no overlap
+                if(this->_box[d+1] < bb._box[d] || 
+                   bb._box[d+1] < this->_box[d]) {
                     return false;
                 }
             }

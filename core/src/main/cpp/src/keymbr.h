@@ -21,6 +21,7 @@
 #include "pch.h"
 #include "./util/log.h"
 #include "typemgr.h"
+#include "float_utils.h"
 #include <jni.h>
 
 namespace xtree {
@@ -43,10 +44,11 @@ namespace xtree {
     class KeyMBR {
     private:
         void init() {
-            this->_box = new float[this->dimension*2];
+            this->_box = new int32_t[this->dimension*2];
             for(unsigned short d=0; d<this->dimension*2; d+=2) {
-                _box[d] = numeric_limits<float>::max();//(1<<this->bits)-1;
-                _box[d+1] = -(numeric_limits<float>::max());//-((1<<this->bits)-1);
+                // Use static constants for min/max bounds
+                _box[d] = SORTABLE_FLOAT_MAX;    // min values start at max
+                _box[d+1] = SORTABLE_FLOAT_MIN;  // max values start at min
             }
 //            this->numBytes = (unsigned short)(ceil(((double)(bits*2.0*dimension)/8.0)));
 //            this->data = NULL;
@@ -87,8 +89,8 @@ namespace xtree {
             assert(_box!=NULL);
             // resets the box data to numeric limits of the bitsize
             for(unsigned short d=0; d<dimension*2; d+=2) {
-                _box[d] = numeric_limits<float>::max(); //(1<<bits)-1;
-                _box[d+1] = -numeric_limits<float>::max(); //-((1<<bits)-1);
+                _box[d] = SORTABLE_FLOAT_MAX;    // min values start at max
+                _box[d+1] = SORTABLE_FLOAT_MIN;  // max values start at min
             }
 //            dirty = true;
             // @TODO: don't care if data is null here.  Need some error checking though
@@ -96,8 +98,8 @@ namespace xtree {
         }
 
         unsigned int memUsage() { return sizeof(KeyMBR) +
-                                         (_area != NULL) ? sizeof(double) : 0 +
-                                         (_box != NULL) ? (2*dimension*sizeof(float)) : 0; }
+                                         ((_area != NULL) ? sizeof(double) : 0) +
+                                         ((_box != NULL) ? (2*dimension*sizeof(int32_t)) : 0); }
 
         /*~KeyMBR() {
             delete [] box;
@@ -114,14 +116,20 @@ namespace xtree {
 //        void _unconvert(double &result, unsigned const val, unsigned short axis);
 
 //        int dataSize() const { return numBytes; }
-        float getBoxVal(int idx) const { return this->_box[idx]; }
-        float getMin(unsigned short axis) const { return this->_box[2*axis]; }
-        float getMax(unsigned short axis) const { return this->_box[(2*axis)+1]; }
+        float getBoxVal(int idx) const { return sortableIntToFloat(this->_box[idx]); }
+        float getMin(unsigned short axis) const { return sortableIntToFloat(this->_box[2*axis]); }
+        float getMax(unsigned short axis) const { return sortableIntToFloat(this->_box[(2*axis)+1]); }
+        
+        // Direct access to sortable int values for efficient comparisons
+        // Inline these hot-path functions
+        inline int32_t getSortableBoxVal(int idx) const { return this->_box[idx]; }
+        inline int32_t getSortableMin(unsigned short axis) const { return this->_box[2*axis]; }
+        inline int32_t getSortableMax(unsigned short axis) const { return this->_box[(2*axis)+1]; }
         unsigned short getDimensionCount() const { return dimension; }
 //        unsigned short getBits() const { return bits; }
 //        unsigned char * getData() const { return data; }
         long getMemoryUsed() const {
-            return long(sizeof(KeyMBR) + /*numBytes +*/ dimension*2.0*sizeof(float/*double*/)); }
+            return long(sizeof(KeyMBR) + /*numBytes +*/ dimension*2*sizeof(int32_t)); }
 
         /**
          * quantitative characteristics of this KeyMBR
@@ -169,7 +177,7 @@ namespace xtree {
 
         KeyMBR& operator=(const KeyMBR& rhs) {
             char* boxData = reinterpret_cast<char*>(_box);
-            memcpy(boxData, rhs._box, dimension*2*sizeof(float));
+            memcpy(boxData, rhs._box, dimension*2*sizeof(int32_t));
             return *this;
         }
 
@@ -186,7 +194,7 @@ namespace xtree {
 //        unsigned short bits;        // 2 bytes
 //        int numBytes;               // 4 bytes
         //double *box;                // 8 bytes (should be null when written to disk)
-        float *_box;
+        int32_t *_box;  // Stores coordinates as sortable integers
 //        bool dirty;                 // 1 byte
 //        unsigned char* data;        // 8 bytes
 
@@ -200,8 +208,12 @@ namespace xtree {
     inline double KeyMBR::edgeDeltas() const {
         assert(_box != NULL);
         double distance = 0;
-        for (unsigned short d = 0; d < dimension*2; d+=2)
-            distance += this->_box[d+1] - this->_box[d];
+        for (unsigned short d = 0; d < dimension*2; d+=2) {
+            // Convert to float for distance calculation
+            float min = sortableIntToFloat(this->_box[d]);
+            float max = sortableIntToFloat(this->_box[d+1]);
+            distance += max - min;
+        }
   
         return distance;
     }
@@ -213,15 +225,24 @@ namespace xtree {
         if(_area != NULL) return *_area;
         else {
             assert(_box != NULL);
-//            double area = 1;
-            _area = new double(1.0);
-            for (unsigned short d = 0; d < dimension*2; d+=2)
-                *_area *= (double)(this->_box[d+1] - this->_box[d]);
-//                area *= (double)(box[d+1] - box[d]);
+            double area = 1.0;
+            
+            // Unroll common 2D case for performance
+            if (dimension == 2) {
+                float width = sortableIntToFloat(this->_box[1]) - sortableIntToFloat(this->_box[0]);
+                float height = sortableIntToFloat(this->_box[3]) - sortableIntToFloat(this->_box[2]);
+                area = static_cast<double>(width) * static_cast<double>(height);
+            } else {
+                for (unsigned short d = 0; d < dimension*2; d+=2) {
+                    float min = sortableIntToFloat(this->_box[d]);
+                    float max = sortableIntToFloat(this->_box[d+1]);
+                    area *= (double)(max - min);
+                }
+            }
+            
+            _area = new double(area);
         }
-//        cout << "RETURNING AREA: " << *_area << endl;
         return *_area;
-//        return area;
     }
 
     inline bool KeyMBR::isPoint() const {

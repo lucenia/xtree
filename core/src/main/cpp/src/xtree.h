@@ -215,8 +215,9 @@ namespace xtree {
 
         const KeyMBR* getKey() const { return _recordKey; }
 
-        struct CumulativeOverlap :
-            public std::unary_function< const typename XTreeBucket<RecordType>::_MBRKeyNode*, void/*double*/ > {
+        struct CumulativeOverlap {
+            typedef const typename XTreeBucket<RecordType>::_MBRKeyNode* argument_type;
+            typedef void result_type;
 
             __MBRKeyNode* _candidateKN; // *this mbr
             const KeyMBR *_key; // the proposed key
@@ -557,9 +558,10 @@ namespace xtree {
      * InMemory key vector sort by minimum range value
      */
     template< class Record >
-    struct SortKeysByRangeMin :
-    public std::binary_function<const typename XTreeBucket<Record>::_MBRKeyNode*,
-                                const typename XTreeBucket<Record>::_MBRKeyNode*, bool> {
+    struct SortKeysByRangeMin {
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* first_argument_type;
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* second_argument_type;
+        typedef bool result_type;
         const unsigned short _axis;
         explicit SortKeysByRangeMin( const unsigned short axis ) : _axis(axis) {}
 
@@ -579,9 +581,10 @@ namespace xtree {
      * InMemory key vector sorting by maximum range value
      */
     template< class Record >
-    struct SortKeysByRangeMax :
-    public std::binary_function<const typename XTreeBucket<Record>::_MBRKeyNode*,
-                                const typename XTreeBucket<Record>::_MBRKeyNode*, bool> {
+    struct SortKeysByRangeMax {
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* first_argument_type;
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* second_argument_type;
+        typedef bool result_type;
         const unsigned short _axis;
         explicit SortKeysByRangeMax(const unsigned short axis) : _axis(axis) {}
 
@@ -601,8 +604,9 @@ namespace xtree {
      * Expands a target MBR given an input MBR
      */
     template< class Record >
-    struct StretchBoundingBox :
-    public std::unary_function< const typename XTreeBucket<Record>::_MBRKeyNode*, void > {
+    struct StretchBoundingBox {
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* argument_type;
+        typedef void result_type;
         KeyMBR *_mbr;
         explicit StretchBoundingBox(KeyMBR *key) : _mbr(key) {}
 
@@ -615,9 +619,10 @@ namespace xtree {
      * InMemory key vector sorting by area enlargement required for inserting a new key
      */
     template< class Record >
-    struct SortKeysByAreaEnlargement :
-    public std::binary_function<const typename XTreeBucket<Record>::_MBRKeyNode*,
-                                const typename XTreeBucket<Record>::_MBRKeyNode*, bool> {
+    struct SortKeysByAreaEnlargement {
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* first_argument_type;
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* second_argument_type;
+        typedef bool result_type;
         //const double _area;
         const KeyMBR* _key;
         bool* _zeroEnlargement;
@@ -644,9 +649,10 @@ namespace xtree {
      * InMemory key vector sorting by overlap enlargement required for inserting a new key
      */
     template< class Record >
-    struct SortKeysByOverlapEnlargement :
-    public std::binary_function<const typename XTreeBucket<Record>::_MBRKeyNode*,
-                                const typename XTreeBucket<Record>::_MBRKeyNode*, bool > {
+    struct SortKeysByOverlapEnlargement {
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* first_argument_type;
+        typedef const typename XTreeBucket<Record>::_MBRKeyNode* second_argument_type;
+        typedef bool result_type;
         const KeyMBR* _key;
         typename vector<typename XTreeBucket<Record>::_MBRKeyNode*>::iterator _start;
         typename vector<typename XTreeBucket<Record>::_MBRKeyNode*>::iterator _end;

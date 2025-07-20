@@ -115,7 +115,10 @@ namespace xtree {
      * Used for sorting cache nodes
      */
      template< typename _LRUCacheNode >
-     struct LRUCacheNodeSorter : public std::binary_function<_LRUCacheNode, _LRUCacheNode, bool> {
+     struct LRUCacheNodeSorter {
+        typedef _LRUCacheNode first_argument_type;
+        typedef _LRUCacheNode second_argument_type;
+        typedef bool result_type;
 
         bool operator() (const _LRUCacheNode* const n1, const _LRUCacheNode* const n2) {
             return n1->id < n2->id;

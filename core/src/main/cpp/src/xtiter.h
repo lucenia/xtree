@@ -64,7 +64,7 @@ namespace xtree {
         }
 
         bool hasNext() {
-            return _hasNext;
+            return _hasNext || _recordQueue.size() > 0;
         }
 
         void invalidate() { this->_invalidated = true; }

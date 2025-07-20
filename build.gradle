@@ -53,6 +53,78 @@ gradle.taskGraph.whenReady {
     printBuildBanner()
 }
 
+// Support --snapshot flag for convenience
+if (project.hasProperty('snapshot') || gradle.startParameter.taskNames.any { it.contains('snapshot') }) {
+    ext.versionSuffixOverride = '-SNAPSHOT'
+}
+
+// Configure wrapper task to automatically add SHA256 checksum
+wrapper {
+    gradleVersion = '8.14.3'
+    distributionType = Wrapper.DistributionType.BIN
+    
+    doLast {
+        // Fetch and add SHA256 checksum
+        def sha256Url = new URL(distributionUrl + ".sha256")
+        def sha256Sum = sha256Url.text.trim()
+        
+        // Add checksum to properties file
+        def props = file('gradle/wrapper/gradle-wrapper.properties')
+        def content = props.text
+        
+        if (!content.contains('distributionSha256Sum=')) {
+            // Add after distributionUrl
+            content = content.replaceFirst(
+                /(distributionUrl=.*\n)/, 
+                '$1distributionSha256Sum=' + sha256Sum + '\n'
+            )
+            props.text = content
+            println "Added SHA256 checksum to wrapper properties: ${sha256Sum}"
+        } else {
+            // Update existing checksum
+            content = content.replaceFirst(
+                /distributionSha256Sum=.*/, 
+                'distributionSha256Sum=' + sha256Sum
+            )
+            props.text = content
+            println "Updated SHA256 checksum in wrapper properties: ${sha256Sum}"
+        }
+    }
+}
+
+// Task to verify Gradle wrapper integrity
+task verifyWrapper {
+    group = 'verification'
+    description = 'Verifies the Gradle wrapper SHA256 checksum'
+    
+    doLast {
+        def props = new Properties()
+        file('gradle/wrapper/gradle-wrapper.properties').withInputStream { props.load(it) }
+        
+        def configuredSha = props.getProperty('distributionSha256Sum')
+        if (!configuredSha) {
+            throw new GradleException("No SHA256 checksum found in gradle-wrapper.properties")
+        }
+        
+        def distributionUrl = props.getProperty('distributionUrl')
+        def version = distributionUrl.replaceAll(/.*gradle-(.+)-bin\.zip/, '$1')
+        
+        // Fetch official SHA256
+        def sha256Url = new URL(distributionUrl + ".sha256")
+        def officialSha = sha256Url.text.trim()
+        
+        if (configuredSha == officialSha) {
+            println "✓ Gradle wrapper verification successful!"
+            println "  Version: ${version}"
+            println "  SHA256:  ${configuredSha}"
+        } else {
+            throw new GradleException("SHA256 checksum mismatch!\n" +
+                "  Expected: ${officialSha}\n" +
+                "  Found:    ${configuredSha}")
+        }
+    }
+}
+
 allprojects {
     repositories {
         mavenCentral()
@@ -62,17 +134,4 @@ allprojects {
 // Include the native subproject and hook into Gradle's build lifecycle
 subprojects {
     apply plugin: 'base'
-
-    // Wire native build into Gradle lifecycle
-    tasks.named('build') {
-        if (project.name == 'cpp') {
-            dependsOn 'buildNative'
-        }
-    }
-
-    // Wire native clean into Gradle lifecycle
-    tasks.named("clean") {
-        dependsOn(":core:src:main:cpp:cleanNative")
-    }
-
 }

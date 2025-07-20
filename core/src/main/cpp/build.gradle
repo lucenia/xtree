@@ -35,6 +35,8 @@ task configureNative(type: Exec) {
 
     if (project.hasProperty("versionSuffixOverride")) {
         cmakeArgs += "-DVERSION_SUFFIX_OVERRIDE=${project.versionSuffixOverride}"
+    } else if (rootProject.hasProperty("versionSuffixOverride")) {
+        cmakeArgs += "-DVERSION_SUFFIX_OVERRIDE=${rootProject.versionSuffixOverride}"
     }
 
     commandLine cmakeArgs
@@ -65,8 +67,56 @@ task buildNativeAll {
     dependsOn cleanNative, buildNative
 }
 
-// Hook into the top-level build lifecycle
-tasks.named('build') {
-    dependsOn 'buildNative'
+task configureNativeSnapshot(type: Exec) {
+    group = "native"
+    description = "Configure native build with SNAPSHOT version"
+    
+    doFirst {
+        file(nativeBuildDir).mkdirs()
+    }
+    
+    workingDir nativeBuildDir
+    commandLine 'cmake', project.projectDir, "-DCMAKE_BUILD_TYPE=Release", "-DVERSION_SUFFIX_OVERRIDE=-SNAPSHOT"
+}
+
+task buildSnapshot {
+    group = "build"
+    description = "Build a SNAPSHOT version of the native library"
+    dependsOn cleanNative, configureNativeSnapshot, compileNative
+    compileNative.mustRunAfter configureNativeSnapshot
+    configureNativeSnapshot.mustRunAfter cleanNative
+}
+
+task testNative(type: Exec) {
+    group = "verification"
+    description = "Run native C++ tests"
+    dependsOn compileNative
+    workingDir nativeBuildDir
+    
+    // Platform-specific test executable path
+    def testExecutable = "${nativeBuildDir}/bin/xtree_tests"
+    if (System.getProperty("os.name").toLowerCase().contains("windows")) {
+        testExecutable = "${nativeBuildDir}/bin/Release/xtree_tests.exe"
+    }
+    
+    commandLine testExecutable
+    
+    doFirst {
+        if (!file(testExecutable).exists()) {
+            throw new GradleException("Test executable not found: ${testExecutable}")
+        }
+    }
+}
+
+// Wire into standard lifecycle tasks
+afterEvaluate {
+    tasks.build.dependsOn buildNative
+    tasks.clean.dependsOn cleanNative
+    tasks.check.dependsOn testNative
+    
+    // Configure test task to run tests
+    task test {
+        dependsOn testNative
+    }
 }
 
