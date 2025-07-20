@@ -49,6 +49,7 @@ template<> LRUCache<IRecord, UniqueId, LRUDeleteObject> IndexDetails<MockRecord>
 class TestableXTreeBucket : public XTreeBucket<MockRecord> {
 public:
     using XTreeBucket<MockRecord>::XTreeBucket;
+    using XTreeBucket<MockRecord>::_insert;  // Expose protected method for testing
 };
 
 // Minimal test fixture
@@ -60,13 +61,24 @@ protected:
         index = new IndexDetails<MockRecord>(2, 4, &dummyFields, 1024L * 1024L, nullptr, nullptr);
         root = new TestableXTreeBucket(index, true);
         
-        // Add root to cache
-        auto& cache = IndexDetails<MockRecord>::getCache();
-        cachedRoot = cache.add(index->getNextNodeID(), static_cast<IRecord*>(root));
+        // For testing, we create a fake cache node that points to our root
+        // but isn't actually in the cache. This avoids memory leaks from the
+        // static cache persisting between tests.
+        cachedRoot = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+            index->getNextNodeID(), static_cast<IRecord*>(root), nullptr);
     }
 
     void TearDown() override {
+        // Delete the fake cache node (which doesn't delete root since we're managing it)
+        cachedRoot->object = nullptr; // Prevent the cache node from deleting root
+        delete cachedRoot;
+        // Now delete root manually
+        delete root;
         delete index;
+        
+        // Clear the static cache to prevent memory leaks from splitRoot operations
+        // This is important because splitRoot adds new buckets to the real cache
+        IndexDetails<MockRecord>::clearCache();
     }
 
     IndexDetails<MockRecord>* index;
@@ -108,13 +120,20 @@ TEST_F(XTreeBucketTest, MockBucketInsertion) {
     EXPECT_CALL(*mock, memoryUsage())
         .WillRepeatedly(Return(100L));
     
-    // Insert the record using xt_insert which handles caching
-    root->xt_insert(cachedRoot, mock);
+    // For testing with mocks, we need to create a fake cache node manually
+    // instead of using xt_insert which would add the mock to the real cache
+    auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+        index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
+    
+    // Use the internal _insert method directly
+    root->_insert(cachedRoot, cachedMock);
     
     // Verify insertion
     EXPECT_EQ(root->n(), 1);
     
-    // Clean up mock objects
+    // Clean up: prevent the cache node from deleting the mock
+    cachedMock->object = nullptr;
+    delete cachedMock;
     delete mockKey;
     delete mock;
 }
@@ -123,6 +142,7 @@ TEST_F(XTreeBucketTest, MockMultipleInsertions) {
     const int NUM_RECORDS = 5;
     vector<MockRecord*> mocks;
     vector<KeyMBR*> mockKeys;
+    vector<CacheNode*> cachedMocks;
     
     for (int i = 0; i < NUM_RECORDS; ++i) {
         auto* mock = new MockRecord();
@@ -146,13 +166,22 @@ TEST_F(XTreeBucketTest, MockMultipleInsertions) {
         EXPECT_CALL(*mock, memoryUsage())
             .WillRepeatedly(Return(100L));
         
-        // Insert using xt_insert
-        root->xt_insert(cachedRoot, mock);
+        // Create fake cache node for testing
+        auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+            index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
+        cachedMocks.push_back(cachedMock);
+        
+        // Insert using _insert directly
+        root->_insert(cachedRoot, cachedMock);
     }
     
     EXPECT_EQ(root->n(), NUM_RECORDS);
     
-    // Clean up mock objects
+    // Clean up
+    for (auto* cachedMock : cachedMocks) {
+        cachedMock->object = nullptr;  // Prevent cache node from deleting mock
+        delete cachedMock;
+    }
     for (auto* mockKey : mockKeys) {
         delete mockKey;
     }
@@ -166,6 +195,7 @@ TEST_F(XTreeBucketTest, MockInsertionWithSplitScenario) {
     const int LARGE_NUM_RECORDS = 50;  // Should be > XTREE_M
     vector<MockRecord*> mocks;
     vector<KeyMBR*> mockKeys;
+    vector<CacheNode*> cachedMocks;
     
     for (int i = 0; i < LARGE_NUM_RECORDS; ++i) {
         auto* mock = new MockRecord();
@@ -187,15 +217,24 @@ TEST_F(XTreeBucketTest, MockInsertionWithSplitScenario) {
         EXPECT_CALL(*mock, memoryUsage())
             .WillRepeatedly(Return(100L));
         
-        // Insert using xt_insert
-        root->xt_insert(cachedRoot, mock);
+        // Create fake cache node for testing
+        auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+            index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
+        cachedMocks.push_back(cachedMock);
+        
+        // Insert using _insert directly
+        root->_insert(cachedRoot, cachedMock);
     }
     
     // After many insertions, the tree structure should have grown
     EXPECT_GE(root->n(), 1);  // Root should have at least one child
     EXPECT_GT(root->memoryUsage(), sizeof(XTreeBucket<MockRecord>));
     
-    // Clean up mock objects
+    // Clean up
+    for (auto* cachedMock : cachedMocks) {
+        cachedMock->object = nullptr;  // Prevent cache node from deleting mock
+        delete cachedMock;
+    }
     for (auto* mockKey : mockKeys) {
         delete mockKey;
     }

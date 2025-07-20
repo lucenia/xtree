@@ -35,10 +35,11 @@ protected:
     IndexDetails<DataRecord>* idx;
     XTreeBucket<DataRecord>* root;
     LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>* cachedRoot;
+    vector<const char*>* dimLabels;
     
     void SetUp() override {
         // Create index with 2D coordinates
-        vector<const char*>* dimLabels = new vector<const char*>();
+        dimLabels = new vector<const char*>();
         dimLabels->push_back("longitude");
         dimLabels->push_back("latitude");
         
@@ -47,13 +48,25 @@ protected:
         // Create root bucket
         root = new XTreeBucket<DataRecord>(idx, true, nullptr, nullptr, 0, true, 0);
         
-        // Get cache and add root
-        auto& cache = IndexDetails<DataRecord>::getCache();
-        cachedRoot = cache.add(idx->getNextNodeID(), static_cast<IRecord*>(root));
+        // For testing, we create a fake cache node that points to our root
+        // but isn't actually in the cache. This avoids memory leaks from the
+        // static cache persisting between tests.
+        cachedRoot = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
+            idx->getNextNodeID(), static_cast<IRecord*>(root), nullptr);
     }
     
     void TearDown() override {
+        // Delete the fake cache node (which doesn't delete root since we're managing it)
+        cachedRoot->object = nullptr; // Prevent the cache node from deleting root
+        delete cachedRoot;
+        // Now delete root manually
+        delete root;
         delete idx;
+        delete dimLabels;
+        
+        // Clear the static cache to prevent memory leaks from splitRoot operations
+        // This is important because splitRoot adds new buckets to the real cache
+        IndexDetails<DataRecord>::clearCache();
     }
     
     // Helper to create a data record with a bounding box

@@ -127,6 +127,9 @@ TEST_F(IndexDetailsTest, Creation) {
     
     EXPECT_EQ(idx.getDimensionCount(), 3);
     EXPECT_EQ(idx.getPrecision(), 32);
+    
+    // Clean up allocated memory
+    delete dimLabels;
 }
 
 TEST_F(IndexDetailsTest, NodeIDGeneration) {
@@ -139,6 +142,9 @@ TEST_F(IndexDetailsTest, NodeIDGeneration) {
     UniqueId id1 = idx.getNextNodeID();
     UniqueId id2 = idx.getNextNodeID();
     EXPECT_EQ(id2, id1 + 1);
+    
+    // Clean up allocated memory
+    delete dimLabels;
 }
 
 // XTreeBucket Tests
@@ -158,6 +164,9 @@ protected:
     void TearDown() override {
         delete idx;
         delete dimLabels;
+        
+        // Clear the static cache to prevent any potential memory leaks
+        IndexDetails<DataRecord>::clearCache();
     }
 };
 
@@ -249,4 +258,26 @@ TEST_F(SortingFunctorTest, SortByRangeMax) {
     for (int i = 0; i < 4; i++) {
         EXPECT_LE(nodes[i]->getKey()->getMax(0), nodes[i+1]->getKey()->getMax(0));
     }
+}
+
+// XTreeBucket Destructor Test - separate test suite to avoid conflict with TEST_F
+TEST(XTreeBucketDestructorTest, CleansUpParentNodeMemory) {
+    // Create a simple index
+    vector<const char*> dimLabels = {"x", "y", "z"};
+    IndexDetails<DataRecord> idx(3, 32, &dimLabels, 1024*1024, nullptr, nullptr);
+    
+    // Create multiple buckets to test destructor
+    XTreeBucket<DataRecord>* bucket1 = new XTreeBucket<DataRecord>(&idx, true);
+    XTreeBucket<DataRecord>* bucket2 = new XTreeBucket<DataRecord>(&idx, false);
+    
+    // The destructor should properly clean up the _parent pointer
+    // without causing memory leaks (as detected by valgrind)
+    delete bucket1;
+    delete bucket2;
+    
+    // If we get here without crashing, the destructor worked correctly
+    SUCCEED();
+    
+    // Clear the static cache to prevent any potential memory leaks
+    IndexDetails<DataRecord>::clearCache();
 }

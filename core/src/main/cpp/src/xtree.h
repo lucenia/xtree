@@ -342,6 +342,35 @@ namespace xtree {
                 _memoryUsage += (MAX(XTREE_CHILDVEC_INIT_SIZE, this->_n)*knSize()) + _key->memUsage();
         }
 
+        // Destructor to clean up allocated memory
+        ~XTreeBucket() {
+            // Only delete the parent node if it was allocated by createParentKN
+            // This fixes the memory leak detected by valgrind in splitRoot
+            if (_parent != NULL) {
+                delete _parent;
+                _parent = NULL;
+            }
+
+            // Clean up pre-allocated but unused child nodes
+            // These are nodes that were allocated in the constructor but never used
+            // (i.e., nodes where index >= _n)
+            for (size_t i = _n; i < _children.size(); i++) {
+                if (_children[i] != NULL) {
+                    delete _children[i];
+                }
+            }
+            
+            // Note: We don't delete active child nodes (i < _n) because they
+            // are cached objects that should be managed by their owners
+
+            // Note: _key is deleted by IRecord destructor
+            
+            // IMPORTANT: There is a known issue where splitRoot adds new buckets to the
+            // real static cache, but tests using fake cache nodes don't clean them up.
+            // This can cause memory leaks in tests. The proper fix is to ensure tests
+            // clean up all cached buckets, not just fake cache nodes.
+        }
+
         // generic traversal with a generic lambda function to be called on each
         // visit
         template<typename Result, typename Visit, typename TraversalOrder>

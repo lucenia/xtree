@@ -339,6 +339,10 @@ namespace xtree {
 #ifdef _DEBUG
         log() << "ERASING INDEX " << split_index+1 << " : " << this->_n;
 #endif
+        // Important: When we erase elements, we're removing pointers from the vector
+        // but not deleting the objects they point to. Those objects are now owned by splitBucket.
+        // However, we need to be careful about pre-allocated but unused nodes that might
+        // be in the vector beyond _n. These should still be cleaned up by our destructor.
         this->_children.erase(this->_children.begin()+split_index+1, this->_children.begin()+this->_n);
         this->_memoryUsage -= (this->_n - this->_children.size())*sizeof(_MBRKeyNode*);
         this->_n = split_index;

@@ -101,6 +101,9 @@ namespace xtree {
 
 
         static LRUCache<IRecord, UniqueId, LRUDeleteObject>& getCache() { return cache; }
+        
+        // Clear the cache - useful for test cleanup to prevent memory leaks
+        static void clearCache() { cache.clear(); }
 
         void updateDetails(unsigned short precision,
                       vector<const char*> *dimLabels) {

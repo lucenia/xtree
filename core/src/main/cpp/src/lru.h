@@ -185,6 +185,20 @@ namespace xtree {
 
         	 _nodes.erase(trgtIter);
          }
+         
+         /**
+          * Clears all nodes from the cache, deleting all cached objects.
+          * This is useful for test cleanup to prevent memory leaks.
+          */
+         void clear() {
+             NodeIterator i = _nodes.begin();
+             const NodeIterator end = _nodes.end();
+             for(; i!=end; i++)
+                 delete *i;
+             _nodes.clear();
+             _first = NULL;
+             _last = NULL;
+         }
 
      private:
         //

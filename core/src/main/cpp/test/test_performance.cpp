@@ -161,6 +161,7 @@ TEST_F(XTreePerformanceTest, BulkInsertions) {
     EXPECT_GT(root->n(), 0);
     
     delete idx;
+    delete dimLabels;
 }
 
 TEST_F(XTreePerformanceTest, SpatialQueries) {
@@ -230,4 +231,5 @@ TEST_F(XTreePerformanceTest, SpatialQueries) {
         delete query;
     }
     delete idx;
+    delete dimLabels;
 }
