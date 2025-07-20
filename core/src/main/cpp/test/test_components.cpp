@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 #include <algorithm>
+#include <vector>
 #include "../src/xtree.h"
 #include "../src/xtree.hpp"
 #include "../src/indexdetails.h"
@@ -26,9 +27,7 @@
 using namespace xtree;
 using namespace std;
 
-// Initialize static members of IndexDetails (only once per test binary)
-template<> JNIEnv* IndexDetails<DataRecord>::jvm = nullptr;
-template<> LRUCache<IRecord, UniqueId, LRUDeleteObject> IndexDetails<DataRecord>::cache(1024*1024*10); // 10MB cache
+// Note: DataRecord static members are defined in test_globals.cpp
 
 // DataRecord Tests
 class DataRecordTest : public ::testing::Test {

@@ -22,10 +22,12 @@
 #include <vector>
 #include "../src/xtree.h"
 #include "../src/xtree.hpp"
+#include "../src/indexdetails.h"
 
 // #include "xtiter.hpp"
 
 using namespace xtree;
+using namespace std;
 using ::testing::Return;
 using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>;
 
@@ -41,6 +43,7 @@ public:
 
 // Initialize static members of IndexDetails for MockRecord
 template<> JNIEnv* IndexDetails<MockRecord>::jvm = nullptr;
+template<> std::vector<IndexDetails<MockRecord>*> IndexDetails<MockRecord>::indexes = std::vector<IndexDetails<MockRecord>*>();
 template<> LRUCache<IRecord, UniqueId, LRUDeleteObject> IndexDetails<MockRecord>::cache(1024*1024*10); // 10MB cache
 
 class TestableXTreeBucket : public XTreeBucket<MockRecord> {

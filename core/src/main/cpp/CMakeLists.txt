@@ -195,8 +195,14 @@ if(APPLE)
     endif()
 elseif(WIN32)
     # Windows specific paths
-    # Add common Boost installation paths
-    set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} "C:/local/boost_1_88_0" "C:/boost")
+    # Check for vcpkg installation first
+    if(DEFINED ENV{BOOST_ROOT})
+        set(BOOST_ROOT $ENV{BOOST_ROOT})
+        set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${BOOST_ROOT})
+    endif()
+    
+    # Add common Boost installation paths as fallback
+    set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} "C:/local/boost_1_88_0" "C:/boost" "C:/vcpkg/installed/x64-mingw-static")
 endif()
 
 # JNI
@@ -205,13 +211,31 @@ find_package(JNI REQUIRED)
 include_directories(${JNI_INCLUDE_DIRS})
 
 # Boost
-set(Boost_USE_STATIC_LIBS OFF)
+if(WIN32 AND MINGW)
+    # MinGW on Windows typically uses static libs from vcpkg
+    set(Boost_USE_STATIC_LIBS ON)
+else()
+    set(Boost_USE_STATIC_LIBS OFF)
+endif()
 set(Boost_USE_MULTITHREADED ON)
 set(Boost_USE_STATIC_RUNTIME OFF)
 
 # For newer CMake versions, use the new FindBoost approach
 if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
     cmake_policy(SET CMP0167 NEW)
+endif()
+
+# Handle BOOST_ROOT variable policy
+if(POLICY CMP0144)
+    cmake_policy(SET CMP0144 NEW)
+endif()
+
+# Debug Boost search
+if(WIN32)
+    message(STATUS "Windows Boost search:")
+    message(STATUS "  BOOST_ROOT: ${BOOST_ROOT}")
+    message(STATUS "  CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
+    message(STATUS "  CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
 endif()
 
 find_package(Boost 1.58 REQUIRED COMPONENTS system filesystem thread iostreams)
@@ -250,7 +274,7 @@ include(FetchContent)
 FetchContent_Declare(
     googletest
     GIT_REPOSITORY https://github.com/google/googletest.git
-    GIT_TAG release-1.12.1
+    GIT_TAG v1.15.2
 )
 # For Windows: Prevent overriding the parent project's compiler/linker settings
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
@@ -261,6 +285,7 @@ enable_testing()
 
 # Test target with Google Test
 set(GTEST_SOURCES
+    test/test_globals.cpp
     test/test_xtree.cpp
     test/test_keymbr.cpp
     test/test_components.cpp

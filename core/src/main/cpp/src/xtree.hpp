@@ -44,14 +44,6 @@ namespace xtree {
         return ret;
     }
 
-    template<class RecordType>
-    vector<IndexDetails<RecordType>*> IndexDetails<RecordType>::indexes;
-
-    template<class RecordType>
-    LRUCache<IRecord, UniqueId, LRUDeleteObject> IndexDetails<RecordType>::cache(getAvailableSystemMemory());
-
-    template<class RecordType>
-    JNIEnv* IndexDetails<RecordType>::jvm = NULL;
 
     template< class RecordType >
     int XTreeBucket<RecordType>::_insert(CacheNode* thisCacheNode, CacheNode* cachedRecord) {
