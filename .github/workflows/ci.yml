@@ -67,3 +67,26 @@ jobs:
             cat test_output.log
             exit 1
           fi
+  
+  arm-smoke-test:
+    name: ARM Quick Check (Ubuntu ARM64)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      
+      - name: Install minimal dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libboost-all-dev
+      
+      - name: Quick build and test
+        run: |
+          ./gradlew assemble --no-daemon
+          echo "ARM64 build successful!"

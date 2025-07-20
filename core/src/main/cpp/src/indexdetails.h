@@ -67,7 +67,8 @@ namespace xtree {
          * Entry point for deleting an XTree index
          */
         ~IndexDetails() {
-
+            // Don't delete _dimensionLabels here as it's managed by the caller
+            // The caller is responsible for the lifecycle of dimension labels
         }
 
         unsigned short getDimensionCount() const {
@@ -107,9 +108,9 @@ namespace xtree {
         	_precision = precision;
 
         	// Update labels
-        	vector<const char*> *oldLabels = _dimensionLabels;
+        	// Note: We don't delete the old labels here because IndexDetails
+        	// doesn't own the dimension labels - they're managed by the caller
         	_dimensionLabels = dimLabels;
-        	delete oldLabels;
 
         	// If # dimensions is same, do not modify tree
         	// Iff # dimensions has changed, rebuild tree somehow

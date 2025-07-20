@@ -13,25 +13,39 @@ on:
 
 jobs:
   build-release:
-    name: Build Release Artifacts
+    name: Build Release Artifacts (${{ matrix.platform }} ${{ matrix.arch }})
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
         include:
+          # x64 builds
           - os: ubuntu-latest
+            runs-on: ubuntu-latest
             platform: Linux
             arch: x86_64
             cmake-generator: "Unix Makefiles"
           - os: macos-latest
+            runs-on: macos-13
             platform: Mac_OS_X
             arch: x86_64
             cmake-generator: "Unix Makefiles"
           - os: windows-latest
+            runs-on: windows-latest
             platform: Windows
             arch: x86_64
             cmake-generator: "MinGW Makefiles"
+          # ARM builds
+          - os: ubuntu-latest
+            runs-on: ubuntu-24.04-arm
+            platform: Linux
+            arch: arm64
+            cmake-generator: "Unix Makefiles"
+          - os: macos-latest
+            runs-on: macos-14
+            platform: Mac_OS_X
+            arch: arm64
+            cmake-generator: "Unix Makefiles"
     
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runs-on }}
     
     steps:
       - name: Checkout code

@@ -37,6 +37,11 @@ task configureNative(type: Exec) {
     if (System.getenv("CMAKE_TOOLCHAIN_FILE")) {
         cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=${System.getenv("CMAKE_TOOLCHAIN_FILE")}"
     }
+    
+    // Add CMAKE_GENERATOR if specified (for Windows MinGW support)
+    if (System.getenv("CMAKE_GENERATOR")) {
+        cmakeArgs += "-G${System.getenv("CMAKE_GENERATOR")}"
+    }
 
     if (project.hasProperty("versionSuffixOverride")) {
         cmakeArgs += "-DVERSION_SUFFIX_OVERRIDE=${project.versionSuffixOverride}"
@@ -91,6 +96,11 @@ task configureNativeSnapshot(type: Exec) {
     // Add CMAKE_TOOLCHAIN_FILE if specified (for Windows vcpkg support)
     if (System.getenv("CMAKE_TOOLCHAIN_FILE")) {
         cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=${System.getenv("CMAKE_TOOLCHAIN_FILE")}"
+    }
+    
+    // Add CMAKE_GENERATOR if specified (for Windows MinGW support)
+    if (System.getenv("CMAKE_GENERATOR")) {
+        cmakeArgs += "-G${System.getenv("CMAKE_GENERATOR")}"
     }
     
     commandLine cmakeArgs

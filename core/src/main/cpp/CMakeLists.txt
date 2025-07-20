@@ -110,14 +110,34 @@ message(STATUS "Compiler version: ${COMPILER_VERSION_INFO}")
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Determine platform
+# Determine platform and architecture
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-    set(PLATFORM_NAME "Mac_OS_X-x86_64-64")
-elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
-    set(PLATFORM_NAME "Linux-amd64-64")
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" OR CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
+        set(PLATFORM_NAME "Mac_OS_X-arm64-64")
+    else()
+        set(PLATFORM_NAME "Mac_OS_X-x86_64-64")
+    endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        set(PLATFORM_NAME "Linux-arm64-64")
+    elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "armv7|arm")
+        set(PLATFORM_NAME "Linux-arm-32")
+    elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "amd64")
+        set(PLATFORM_NAME "Linux-amd64-64")
+    else()
+        set(PLATFORM_NAME "Linux-${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    if(CMAKE_SYSTEM_PROCESSOR STREQUAL "ARM64")
+        set(PLATFORM_NAME "Windows-arm64-64")
+    else()
+        set(PLATFORM_NAME "Windows-x86_64-64")
+    endif()
 else()
-    set(PLATFORM_NAME "Linux-i386")
+    set(PLATFORM_NAME "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
 endif()
+
+message(STATUS "Platform detected: ${PLATFORM_NAME}")
 
 set(LIBRARY_OUTPUT_NAME "XTree-${PLATFORM_NAME}-${FULL_VERSION}")
 
@@ -129,47 +149,9 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
 endif()
 
-# Source files
-file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
-    # RELATIVE ${CMAKE_SOURCE_DIR}
-    *.cpp
-)
-file(GLOB_RECURSE HEADER_FILES CONFIGURE_DEPENDS
-    *.h
-    *.hpp
-)
-
-# Exclude test files and test1.cpp from library
-list(FILTER SRC_FILES EXCLUDE REGEX "test/.*")
-list(FILTER SRC_FILES EXCLUDE REGEX "test1.cpp")
-
-# --- Optional for IDEs like Qt Creator ---
-if(SRC_FILES)
-    source_group(TREE "${CMAKE_SOURCE_DIR}" FILES ${SRC_FILES})
-endif()
-
-if(HEADER_FILES)
-    source_group(TREE "${CMAKE_SOURCE_DIR}" FILES ${HEADER_FILES})
-endif()
-
-
-# Add source group for IDEs like Qt Creator
-source_group("Source Files" FILES ${SRC_FILES})
-source_group("Header Files" FILES ${HEADER_FILES})
-
-# Include paths
-include_directories(
-    ${CMAKE_SOURCE_DIR}
-    ${CMAKE_SOURCE_DIR}/third-party
-)
-
-# Test target
-file(GLOB TEST_SOURCES test/*.cpp)
-source_group("Tests" FILES ${TEST_SOURCES})
-
-if(TEST_SOURCES)
-    source_group("Tests" FILES ${TEST_SOURCES})
-endif()
+# ==========================================
+# Find dependencies BEFORE processing sources
+# ==========================================
 
 # Platform-specific setup for finding dependencies
 if(APPLE)
@@ -214,11 +196,17 @@ include_directories(${JNI_INCLUDE_DIRS})
 if(WIN32 AND MINGW)
     # MinGW on Windows typically uses static libs from vcpkg
     set(Boost_USE_STATIC_LIBS ON)
+    set(Boost_USE_STATIC_RUNTIME OFF)
+    
+    # When using vcpkg, ensure we use the correct triplet
+    if(CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg")
+        set(VCPKG_TARGET_TRIPLET "x64-mingw-static" CACHE STRING "")
+    endif()
 else()
     set(Boost_USE_STATIC_LIBS OFF)
+    set(Boost_USE_STATIC_RUNTIME OFF)
 endif()
 set(Boost_USE_MULTITHREADED ON)
-set(Boost_USE_STATIC_RUNTIME OFF)
 
 # For newer CMake versions, use the new FindBoost approach
 if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
@@ -236,6 +224,7 @@ if(WIN32)
     message(STATUS "  BOOST_ROOT: ${BOOST_ROOT}")
     message(STATUS "  CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
     message(STATUS "  CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
+    message(STATUS "  VCPKG_TARGET_TRIPLET: ${VCPKG_TARGET_TRIPLET}")
 endif()
 
 find_package(Boost 1.58 REQUIRED COMPONENTS system filesystem thread iostreams)
@@ -244,11 +233,50 @@ if(Boost_FOUND)
     message(STATUS "Boost version: ${Boost_VERSION}")
     message(STATUS "Boost include dirs: ${Boost_INCLUDE_DIRS}")
     message(STATUS "Boost libraries: ${Boost_LIBRARIES}")
-    include_directories(${Boost_INCLUDE_DIRS})
+    
+    # Add Boost include directories BEFORE other includes to ensure they're found first
+    include_directories(BEFORE ${Boost_INCLUDE_DIRS})
+    
+    # Also add to compile definitions for better Windows support
+    if(WIN32)
+        add_compile_definitions(BOOST_ALL_NO_LIB)
+    endif()
+    
     link_directories(${Boost_LIBRARY_DIRS})
 else()
     message(FATAL_ERROR "Boost not found. Please install Boost libraries.")
 endif()
+
+# ==========================================
+# Include paths (after Boost)
+# ==========================================
+include_directories(
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/third-party
+)
+
+# ==========================================
+# Source files
+# ==========================================
+file(GLOB_RECURSE SRC_FILES CONFIGURE_DEPENDS
+    *.cpp
+)
+file(GLOB_RECURSE HEADER_FILES CONFIGURE_DEPENDS
+    *.h
+    *.hpp
+)
+
+# Exclude test files and test1.cpp from library
+list(FILTER SRC_FILES EXCLUDE REGEX "test/.*")
+list(FILTER SRC_FILES EXCLUDE REGEX "test1.cpp")
+
+# Add source group for IDEs
+source_group("Source Files" FILES ${SRC_FILES})
+source_group("Header Files" FILES ${HEADER_FILES})
+
+# Test target
+file(GLOB TEST_SOURCES test/*.cpp)
+source_group("Tests" FILES ${TEST_SOURCES})
 
 # Shared library target
 if(SRC_FILES)

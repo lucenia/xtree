@@ -145,9 +145,10 @@ TEST_F(IndexDetailsTest, NodeIDGeneration) {
 class XTreeBucketTest : public ::testing::Test {
 protected:
     IndexDetails<DataRecord>* idx;
+    vector<const char*>* dimLabels;
     
     void SetUp() override {
-        vector<const char*>* dimLabels = new vector<const char*>();
+        dimLabels = new vector<const char*>();
         dimLabels->push_back("x");
         dimLabels->push_back("y");
         
@@ -156,6 +157,7 @@ protected:
     
     void TearDown() override {
         delete idx;
+        delete dimLabels;
     }
 };
 
