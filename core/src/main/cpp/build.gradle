@@ -42,6 +42,11 @@ task configureNative(type: Exec) {
     if (System.getenv("CMAKE_GENERATOR")) {
         cmakeArgs += "-G${System.getenv("CMAKE_GENERATOR")}"
     }
+    
+    // Add VCPKG_TARGET_TRIPLET if specified (for Windows vcpkg support)
+    if (System.getenv("VCPKG_TARGET_TRIPLET")) {
+        cmakeArgs += "-DVCPKG_TARGET_TRIPLET=${System.getenv("VCPKG_TARGET_TRIPLET")}"
+    }
 
     if (project.hasProperty("versionSuffixOverride")) {
         cmakeArgs += "-DVERSION_SUFFIX_OVERRIDE=${project.versionSuffixOverride}"
@@ -101,6 +106,11 @@ task configureNativeSnapshot(type: Exec) {
     // Add CMAKE_GENERATOR if specified (for Windows MinGW support)
     if (System.getenv("CMAKE_GENERATOR")) {
         cmakeArgs += "-G${System.getenv("CMAKE_GENERATOR")}"
+    }
+    
+    // Add VCPKG_TARGET_TRIPLET if specified (for Windows vcpkg support)
+    if (System.getenv("VCPKG_TARGET_TRIPLET")) {
+        cmakeArgs += "-DVCPKG_TARGET_TRIPLET=${System.getenv("VCPKG_TARGET_TRIPLET")}"
     }
     
     commandLine cmakeArgs

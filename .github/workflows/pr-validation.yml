@@ -84,8 +84,8 @@ jobs:
           C:/vcpkg/vcpkg.exe install boost-system boost-filesystem boost-thread boost-iostreams --triplet x64-mingw-static
           
           # Set environment variables for CMake to find Boost
-          echo "BOOST_ROOT=C:/vcpkg/installed/x64-mingw-static" >> $GITHUB_ENV
           echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
+          echo "VCPKG_TARGET_TRIPLET=x64-mingw-static" >> $GITHUB_ENV
       
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -97,12 +97,14 @@ jobs:
         env:
           CMAKE_GENERATOR: ${{ matrix.cmake-generator }}
           CMAKE_TOOLCHAIN_FILE: ${{ env.CMAKE_TOOLCHAIN_FILE }}
+          VCPKG_TARGET_TRIPLET: ${{ env.VCPKG_TARGET_TRIPLET }}
       
       - name: Run tests
         run: ./gradlew test --no-daemon
         env:
           CMAKE_GENERATOR: ${{ matrix.cmake-generator }}
           CMAKE_TOOLCHAIN_FILE: ${{ env.CMAKE_TOOLCHAIN_FILE }}
+          VCPKG_TARGET_TRIPLET: ${{ env.VCPKG_TARGET_TRIPLET }}
       
       - name: Upload test results
         if: always()

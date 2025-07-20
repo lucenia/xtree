@@ -142,7 +142,7 @@ TEST_F(IndexDetailsTest, NodeIDGeneration) {
 }
 
 // XTreeBucket Tests
-class XTreeBucketTest : public ::testing::Test {
+class ComponentXTreeBucketTest : public ::testing::Test {
 protected:
     IndexDetails<DataRecord>* idx;
     vector<const char*>* dimLabels;
@@ -161,7 +161,7 @@ protected:
     }
 };
 
-TEST_F(XTreeBucketTest, Creation) {
+TEST_F(ComponentXTreeBucketTest, Creation) {
     XTreeBucket<DataRecord> bucket(idx, true, nullptr, nullptr, 0, true, 0);
     
     EXPECT_EQ(bucket.n(), 0);
@@ -171,7 +171,7 @@ TEST_F(XTreeBucketTest, Creation) {
     EXPECT_EQ(bucket.getIdxDetails(), idx);
 }
 
-TEST_F(XTreeBucketTest, MemoryUsage) {
+TEST_F(ComponentXTreeBucketTest, MemoryUsage) {
     XTreeBucket<DataRecord> bucket(idx, true, nullptr, nullptr, 0, true, 0);
     
     long memUsage = bucket.memoryUsage();

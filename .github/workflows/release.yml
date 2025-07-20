@@ -81,8 +81,8 @@ jobs:
           C:/vcpkg/bootstrap-vcpkg.bat
           C:/vcpkg/vcpkg.exe install boost-system boost-filesystem boost-thread boost-iostreams --triplet x64-mingw-static
           
-          echo "BOOST_ROOT=C:/vcpkg/installed/x64-mingw-static" >> $GITHUB_ENV
           echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
+          echo "VCPKG_TARGET_TRIPLET=x64-mingw-static" >> $GITHUB_ENV
       
       - name: Get version from tag
         id: get_version
@@ -112,6 +112,7 @@ jobs:
           CMAKE_BUILD_TYPE: Release
           CMAKE_GENERATOR: ${{ matrix.cmake-generator }}
           CMAKE_TOOLCHAIN_FILE: ${{ env.CMAKE_TOOLCHAIN_FILE }}
+          VCPKG_TARGET_TRIPLET: ${{ env.VCPKG_TARGET_TRIPLET }}
       
       - name: Package artifacts
         run: |

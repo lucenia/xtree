@@ -177,14 +177,17 @@ if(APPLE)
     endif()
 elseif(WIN32)
     # Windows specific paths
-    # Check for vcpkg installation first
-    if(DEFINED ENV{BOOST_ROOT})
-        set(BOOST_ROOT $ENV{BOOST_ROOT})
-        set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${BOOST_ROOT})
+    # When using vcpkg, let the toolchain file handle everything
+    if(NOT CMAKE_TOOLCHAIN_FILE)
+        # Only set manual paths if not using vcpkg
+        if(DEFINED ENV{BOOST_ROOT})
+            set(BOOST_ROOT $ENV{BOOST_ROOT})
+            set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${BOOST_ROOT})
+        endif()
+        
+        # Add common Boost installation paths as fallback
+        set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} "C:/local/boost_1_88_0" "C:/boost")
     endif()
-    
-    # Add common Boost installation paths as fallback
-    set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} "C:/local/boost_1_88_0" "C:/boost" "C:/vcpkg/installed/x64-mingw-static")
 endif()
 
 # JNI
@@ -222,9 +225,16 @@ endif()
 if(WIN32)
     message(STATUS "Windows Boost search:")
     message(STATUS "  BOOST_ROOT: ${BOOST_ROOT}")
+    message(STATUS "  BOOST_INCLUDEDIR: ${BOOST_INCLUDEDIR}")
     message(STATUS "  CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
     message(STATUS "  CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
     message(STATUS "  VCPKG_TARGET_TRIPLET: ${VCPKG_TARGET_TRIPLET}")
+endif()
+
+# For Windows with vcpkg, let vcpkg handle everything
+if(WIN32 AND CMAKE_TOOLCHAIN_FILE)
+    # Ensure we use the vcpkg provided Boost
+    set(Boost_NO_SYSTEM_PATHS ON)
 endif()
 
 find_package(Boost 1.58 REQUIRED COMPONENTS system filesystem thread iostreams)
