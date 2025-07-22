@@ -210,8 +210,15 @@ task testNative {
             .redirectErrorStream(true)
             .start()
         
-        // Process output line by line for real-time updates
-        proc.inputStream.eachLine { line ->
+        // Simply run the tests and capture all output
+        def output = new StringBuilder()
+        def error = new StringBuilder()
+        
+        proc.consumeProcessOutput(output, error)
+        def exitCode = proc.waitFor()
+        
+        // Process the complete output
+        output.toString().eachLine { line ->
             // Detect test suite starts
             if (line =~ /\[----------\]\s+\d+\s+tests?\s+from\s+(\w+)/) {
                 def matcher = line =~ /\[----------\]\s+\d+\s+tests?\s+from\s+(\w+)/
@@ -221,8 +228,7 @@ task testNative {
             // Detect individual test starts
             else if (line =~ /\[\s*RUN\s*\]/) {
                 testCount++
-                print "\r[${testCount}] ${line}"
-                System.out.flush()
+                print "[${testCount}] ${line}"
             }
             // Detect test passes
             else if (line =~ /\[\s*OK\s*\]/) {
@@ -238,11 +244,7 @@ task testNative {
             }
             // Show test summary lines
             else if (line =~ /\[==========\]/ || line =~ /\[\s*PASSED\s*\]/) {
-                println "\n${line}"
-            }
-            // Show failure details
-            else if (testsFailed && line.trim()) {
-                println line
+                println "${line}"
             }
             // Show performance metrics
             else if (line.contains("operations:") || line.contains("queries:") || 
@@ -251,11 +253,13 @@ task testNative {
             }
         }
         
-        proc.waitFor()
+        if (error.toString()) {
+            println "Errors: ${error}"
+        }
         
         println "=" * 60
         
-        if (proc.exitValue() != 0 || testsFailed) {
+        if (exitCode != 0 || testsFailed) {
             throw new GradleException("Tests failed: ${failedCount} failed, ${passedCount} passed out of ${testCount} total")
         }
         

@@ -103,6 +103,7 @@ namespace xtree {
         static LRUCache<IRecord, UniqueId, LRUDeleteNone>& getCache() { return cache; }
         
         // Clear the cache - useful for test cleanup to prevent memory leaks
+        // When using LRUDeleteNone, this will only delete cache nodes, not the cached objects
         static void clearCache() { cache.clear(); }
 
         void updateDetails(unsigned short precision,

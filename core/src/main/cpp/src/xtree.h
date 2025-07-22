@@ -272,8 +272,8 @@ namespace xtree {
 
     private:
         // Indicates whether this is a leaf or internal node
-        // A leafnode is a bucket whose keys point to documents
-        // An internal node is a bucket whose keys point to other buckets
+        // A leafnode is a bucket whose keys point to documents (array of DataRecords)
+        // An internal node is a bucket whose keys point to other buckets (array of buckets)
         bool _leaf;
 
         // indicates whether this node is cached
@@ -577,7 +577,7 @@ namespace xtree {
         // pointer to the "previous child". Defined as the previous sibling.
         XTreeBucket<Record>* _prevChild;    // 8 bytes
         // number of keys in the bucket
-        unsigned int _n;                             // 4 bytes
+        unsigned int _n;                    // 4 bytes
         // is this a supernode
         bool _isSupernode;                  // 1 byte
         // internal or leaf node

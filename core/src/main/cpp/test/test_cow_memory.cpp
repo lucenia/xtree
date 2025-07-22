@@ -61,10 +61,23 @@ protected:
     }
     
     void TearDown() override {
-        delete cow_manager;
+        // Since we're using LRUDeleteNone, the cache doesn't own the objects
+        // The root bucket was allocated with page-aligned memory and will be cleaned up here
+        if (root) {
+            // Unregister from COW manager before destroying
+            if (cow_manager) {
+                cow_manager->get_memory_tracker().unregister_memory_region(root);
+            }
+            root->~XTreeBucket<DataRecord>();
+            PageAlignedMemoryTracker::deallocate_aligned(root);
+            root = nullptr;
+        }
         
-        // Clear the static cache which will clean up all buckets
+        // Clear the cache (this just removes the tracking nodes, not the objects)
         IndexDetails<DataRecord>::clearCache();
+        
+        // Now we can safely delete the COW manager
+        delete cow_manager;
         
         delete idx;
         delete dimLabels;
@@ -313,6 +326,284 @@ TEST_F(COWMemoryTest, SaveSnapshot) {
     EXPECT_TRUE(file_exists) << "Snapshot file should exist: " << snapshot_file;
 }
 
+// Test batch registration functionality
+TEST_F(COWMemoryTest, BatchRegistration) {
+    auto initial_stats = cow_manager->get_stats();
+    size_t initial_memory = initial_stats.tracked_memory_bytes;
+    
+    // Test 1: Basic batch registration
+    {
+        vector<void*> allocations;
+        const int BATCH_SIZE = 100;
+        
+        // Allocate memory regions
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            ASSERT_NE(mem, nullptr);
+            allocations.push_back(mem);
+        }
+        
+        // Register as batch
+        cow_manager->begin_batch_registration();
+        for (auto ptr : allocations) {
+            cow_manager->add_to_batch(ptr, 4096);
+        }
+        cow_manager->commit_batch_registration();
+        
+        // Verify all regions were registered
+        auto stats = cow_manager->get_stats();
+        size_t expected_memory = initial_memory + (BATCH_SIZE * 4096);
+        EXPECT_EQ(stats.tracked_memory_bytes, expected_memory);
+        
+        // Clean up
+        for (auto ptr : allocations) {
+            cow_manager->get_memory_tracker().unregister_memory_region(ptr);
+            PageAlignedMemoryTracker::deallocate_aligned(ptr);
+        }
+    }
+    
+    // Test 2: Compare batch vs individual registration performance
+    {
+        const int PERF_BATCH_SIZE = 1000;
+        vector<void*> batch_allocs;
+        vector<void*> individual_allocs;
+        
+        // Allocate memory for both tests
+        for (int i = 0; i < PERF_BATCH_SIZE; i++) {
+            batch_allocs.push_back(PageAlignedMemoryTracker::allocate_aligned(4096));
+            individual_allocs.push_back(PageAlignedMemoryTracker::allocate_aligned(4096));
+        }
+        
+        // Time batch registration
+        auto batch_start = std::chrono::high_resolution_clock::now();
+        cow_manager->begin_batch_registration();
+        for (auto ptr : batch_allocs) {
+            cow_manager->add_to_batch(ptr, 4096);
+        }
+        cow_manager->commit_batch_registration();
+        auto batch_end = std::chrono::high_resolution_clock::now();
+        auto batch_duration = std::chrono::duration_cast<std::chrono::microseconds>(batch_end - batch_start);
+        
+        // Time individual registration
+        auto individual_start = std::chrono::high_resolution_clock::now();
+        for (auto ptr : individual_allocs) {
+            cow_manager->register_bucket_memory(ptr, 4096);
+        }
+        auto individual_end = std::chrono::high_resolution_clock::now();
+        auto individual_duration = std::chrono::duration_cast<std::chrono::microseconds>(individual_end - individual_start);
+        
+        cout << "Batch registration (" << PERF_BATCH_SIZE << " regions): " 
+             << batch_duration.count() << " microseconds" << endl;
+        cout << "Individual registration (" << PERF_BATCH_SIZE << " regions): " 
+             << individual_duration.count() << " microseconds" << endl;
+        
+        // Batch should be at least as fast as individual (usually faster due to single lock)
+        EXPECT_LE(batch_duration.count(), individual_duration.count() * 1.5);
+        
+        // Clean up
+        for (auto ptr : batch_allocs) {
+            cow_manager->get_memory_tracker().unregister_memory_region(ptr);
+            PageAlignedMemoryTracker::deallocate_aligned(ptr);
+        }
+        for (auto ptr : individual_allocs) {
+            cow_manager->get_memory_tracker().unregister_memory_region(ptr);
+            PageAlignedMemoryTracker::deallocate_aligned(ptr);
+        }
+    }
+    
+    // Test 3: Batch registration with COW snapshot
+    {
+        vector<void*> snapshot_allocs;
+        const int SNAPSHOT_BATCH_SIZE = 50;
+        
+        // Register batch of memory
+        cow_manager->begin_batch_registration();
+        for (int i = 0; i < SNAPSHOT_BATCH_SIZE; i++) {
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            snapshot_allocs.push_back(mem);
+            cow_manager->add_to_batch(mem, 4096);
+        }
+        cow_manager->commit_batch_registration();
+        
+        // Trigger snapshot
+        cow_manager->trigger_memory_snapshot();
+        this_thread::sleep_for(std::chrono::milliseconds(200));
+        
+        // Verify snapshot captured batch-registered memory
+        auto stats = cow_manager->get_stats();
+        EXPECT_EQ(stats.operations_since_snapshot, 0);
+        
+        // Clean up
+        for (auto ptr : snapshot_allocs) {
+            cow_manager->get_memory_tracker().unregister_memory_region(ptr);
+            PageAlignedMemoryTracker::deallocate_aligned(ptr);
+        }
+    }
+}
+
+// Test batch unregistration and memory leak prevention
+TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
+    // Test 1: Basic batch unregistration
+    {
+        auto initial_stats = cow_manager->get_stats();
+        size_t initial_memory = initial_stats.tracked_memory_bytes;
+        
+        vector<void*> allocations;
+        const int BATCH_SIZE = 100;
+        
+        // Allocate and register memory
+        cow_manager->begin_batch_registration();
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            allocations.push_back(mem);
+            cow_manager->add_to_batch(mem, 4096);
+        }
+        cow_manager->commit_batch_registration();
+        
+        // Verify memory is tracked
+        auto mid_stats = cow_manager->get_stats();
+        EXPECT_EQ(mid_stats.tracked_memory_bytes, initial_memory + (BATCH_SIZE * 4096));
+        
+        // Batch unregister all
+        cow_manager->begin_batch_unregistration();
+        for (auto ptr : allocations) {
+            cow_manager->add_to_unregister_batch(ptr);
+        }
+        cow_manager->commit_batch_unregistration();
+        
+        // Verify memory is no longer tracked
+        auto final_stats = cow_manager->get_stats();
+        EXPECT_EQ(final_stats.tracked_memory_bytes, initial_memory);
+        
+        // Clean up allocated memory
+        for (auto ptr : allocations) {
+            PageAlignedMemoryTracker::deallocate_aligned(ptr);
+        }
+    }
+    
+    // Test 2: Memory leak detection - ensure unregistered memory doesn't leak tracking
+    {
+        const int LEAK_TEST_SIZE = 500;
+        vector<void*> leak_test_allocs;
+        
+        auto initial_stats = cow_manager->get_stats();
+        size_t initial_memory = initial_stats.tracked_memory_bytes;
+        
+        // Register many allocations
+        for (int i = 0; i < LEAK_TEST_SIZE; i++) {
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            leak_test_allocs.push_back(mem);
+            cow_manager->register_bucket_memory(mem, 4096);
+        }
+        
+        // Verify all are tracked
+        auto mid_stats = cow_manager->get_stats();
+        EXPECT_EQ(mid_stats.tracked_memory_bytes, initial_memory + (LEAK_TEST_SIZE * 4096));
+        
+        // Unregister half individually, half in batch
+        int half = LEAK_TEST_SIZE / 2;
+        
+        // Individual unregistration
+        for (int i = 0; i < half; i++) {
+            cow_manager->get_memory_tracker().unregister_memory_region(leak_test_allocs[i]);
+        }
+        
+        // Batch unregistration
+        cow_manager->begin_batch_unregistration();
+        for (int i = half; i < LEAK_TEST_SIZE; i++) {
+            cow_manager->add_to_unregister_batch(leak_test_allocs[i]);
+        }
+        cow_manager->commit_batch_unregistration();
+        
+        // Verify all tracking is cleaned up
+        auto final_stats = cow_manager->get_stats();
+        EXPECT_EQ(final_stats.tracked_memory_bytes, initial_memory);
+        
+        // Deallocate all memory
+        for (auto ptr : leak_test_allocs) {
+            PageAlignedMemoryTracker::deallocate_aligned(ptr);
+        }
+    }
+    
+    // Test 3: COW protection cleanup on unregistration
+    {
+        const int PROTECTION_TEST_SIZE = 10;
+        vector<void*> protected_allocs;
+        
+        // Allocate and register memory
+        for (int i = 0; i < PROTECTION_TEST_SIZE; i++) {
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            protected_allocs.push_back(mem);
+            cow_manager->register_bucket_memory(mem, 4096);
+        }
+        
+        // Enable COW protection
+        cow_manager->get_memory_tracker().enable_cow_protection();
+        
+        // Batch unregister with protection active
+        cow_manager->begin_batch_unregistration();
+        for (auto ptr : protected_allocs) {
+            cow_manager->add_to_unregister_batch(ptr);
+        }
+        cow_manager->commit_batch_unregistration();
+        
+        // Memory should be writable after unregistration (protection removed)
+        // Write to first allocation to verify
+        *static_cast<int*>(protected_allocs[0]) = 0xDEADBEEF;
+        EXPECT_EQ(*static_cast<int*>(protected_allocs[0]), 0xDEADBEEF);
+        
+        // Clean up
+        for (auto ptr : protected_allocs) {
+            PageAlignedMemoryTracker::deallocate_aligned(ptr);
+        }
+    }
+    
+    // Test 4: Stress test - many rapid register/unregister cycles
+    {
+        const int STRESS_CYCLES = 100;
+        const int ALLOCS_PER_CYCLE = 50;
+        
+        auto initial_stats = cow_manager->get_stats();
+        size_t initial_memory = initial_stats.tracked_memory_bytes;
+        
+        for (int cycle = 0; cycle < STRESS_CYCLES; cycle++) {
+            vector<void*> cycle_allocs;
+            
+            // Batch register
+            cow_manager->begin_batch_registration();
+            for (int i = 0; i < ALLOCS_PER_CYCLE; i++) {
+                void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+                cycle_allocs.push_back(mem);
+                cow_manager->add_to_batch(mem, 4096);
+            }
+            cow_manager->commit_batch_registration();
+            
+            // Verify tracked
+            auto mid_stats = cow_manager->get_stats();
+            EXPECT_EQ(mid_stats.tracked_memory_bytes, 
+                     initial_memory + (ALLOCS_PER_CYCLE * 4096));
+            
+            // Batch unregister
+            cow_manager->begin_batch_unregistration();
+            for (auto ptr : cycle_allocs) {
+                cow_manager->add_to_unregister_batch(ptr);
+            }
+            cow_manager->commit_batch_unregistration();
+            
+            // Verify untracked
+            auto end_stats = cow_manager->get_stats();
+            EXPECT_EQ(end_stats.tracked_memory_bytes, initial_memory);
+            
+            // Deallocate
+            for (auto ptr : cycle_allocs) {
+                PageAlignedMemoryTracker::deallocate_aligned(ptr);
+            }
+        }
+        
+        cout << "Completed " << STRESS_CYCLES << " register/unregister cycles without leaks" << endl;
+    }
+}
+
 // Test comprehensive snapshot validation
 TEST_F(COWMemoryTest, SnapshotValidation) {
     // Track memory before inserting data
@@ -355,8 +646,8 @@ TEST_F(COWMemoryTest, SnapshotValidation) {
     
     // Verify snapshot header contains correct metadata
     auto header = cow_manager->get_snapshot_header(snapshot_file);
-    EXPECT_EQ(header.magic, 0x58545245u) << "Magic should be XTRE";
-    EXPECT_EQ(header.version, 1u) << "Version should be 1";
+    EXPECT_EQ(header.magic, COW_SNAPSHOT_MAGIC) << "Magic should be XTRE";
+    EXPECT_EQ(header.version, COW_SNAPSHOT_VERSION) << "Version should be " << COW_SNAPSHOT_VERSION;
     EXPECT_EQ(header.dimension, idx->getDimensionCount()) << "Dimension should match index";
     EXPECT_EQ(header.precision, idx->getPrecision()) << "Precision should match index";
     EXPECT_EQ(header.total_size, expected_memory) << "Total size should match tracked memory";

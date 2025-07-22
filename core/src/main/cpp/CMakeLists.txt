@@ -346,14 +346,7 @@ set(GTEST_SOURCES
     test/test_float_utils.cpp
     test/test_performance.cpp
     test/test_cow_memory.cpp
-    # test/test_mmapfile.cpp  # Removed - old mmap implementation
-    # test/test_hot_node_detector.cpp  # Removed - depends on old LRU tracker
-    # test/test_xtree_serialization.cpp  # Removed - not needed with HybridMemoryManager
-    # test/test_page_cache.cpp  # Removed - depends on old mmap factory
-    # test/test_datarecord_serialization.cpp  # Removed - not needed with HybridMemoryManager
-    # test/test_hybrid_performance.cpp
-    # test/test_hybrid_simple.cpp
-    # test/test_hybrid_performance_simple.cpp
+    test/test_page_write_tracker.cpp
 )
 
 add_executable(xtree_tests ${GTEST_SOURCES})
