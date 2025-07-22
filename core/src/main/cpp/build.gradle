@@ -18,12 +18,49 @@
 
 def nativeBuildDir = "${rootProject.projectDir}/build/native"
 
+// Helper function to detect system page size
+def detectSystemPageSize() {
+    try {
+        def os = System.getProperty("os.name").toLowerCase()
+        def arch = System.getProperty("os.arch").toLowerCase()
+        
+        if (os.contains("win")) {
+            // Windows typically uses 4KB
+            return 4096
+        } else if (os.contains("mac")) {
+            if (arch.contains("aarch64") || arch.contains("arm")) {
+                // Apple Silicon uses 16KB pages
+                return 16384
+            } else {
+                // Intel Macs use 4KB
+                return 4096
+            }
+        } else {
+            // Linux/Unix - try to get page size
+            def process = "getconf PAGESIZE".execute()
+            process.waitFor()
+            if (process.exitValue() == 0) {
+                return process.text.trim().toInteger()
+            }
+        }
+    } catch (Exception e) {
+        logger.debug("Could not detect page size: ${e.message}")
+    }
+    return 0 // Let C++ code use its defaults
+}
+
 task configureNative(type: Exec) {
     group = "native"
     description = "Run cmake to configure the native C++ XTree build"
 
     doFirst {
         file(nativeBuildDir).mkdirs()
+        
+        // Log detected page size
+        def pageSize = detectSystemPageSize()
+        if (pageSize > 0) {
+            println "Detected system page size: ${pageSize} bytes"
+        }
     }
 
     workingDir nativeBuildDir
@@ -32,6 +69,12 @@ task configureNative(type: Exec) {
         "${project.projectDir}",
         "-DCMAKE_BUILD_TYPE=Release"
     ]
+    
+    // Add detected page size if available
+    def detectedPageSize = detectSystemPageSize()
+    if (detectedPageSize > 0) {
+        cmakeArgs += "-DXTREE_PAGE_SIZE=${detectedPageSize}"
+    }
 
     // Add CMAKE_TOOLCHAIN_FILE if specified (for Windows vcpkg support)
     if (System.getenv("CMAKE_TOOLCHAIN_FILE")) {
@@ -88,6 +131,12 @@ task configureNativeSnapshot(type: Exec) {
     
     doFirst {
         file(nativeBuildDir).mkdirs()
+        
+        // Log detected page size
+        def pageSize = detectSystemPageSize()
+        if (pageSize > 0) {
+            println "Detected system page size: ${pageSize} bytes"
+        }
     }
     
     workingDir nativeBuildDir
@@ -97,6 +146,12 @@ task configureNativeSnapshot(type: Exec) {
         "-DCMAKE_BUILD_TYPE=Release", 
         "-DVERSION_SUFFIX_OVERRIDE=-SNAPSHOT"
     ]
+    
+    // Add detected page size if available
+    def detectedPageSize = detectSystemPageSize()
+    if (detectedPageSize > 0) {
+        cmakeArgs += "-DXTREE_PAGE_SIZE=${detectedPageSize}"
+    }
     
     // Add CMAKE_TOOLCHAIN_FILE if specified (for Windows vcpkg support)
     if (System.getenv("CMAKE_TOOLCHAIN_FILE")) {
@@ -140,37 +195,71 @@ task testNative {
             throw new GradleException("Test executable not found: ${testExecutable}")
         }
         
-        // Run tests and capture output
-        def outputStream = new ByteArrayOutputStream()
-        def errorStream = new ByteArrayOutputStream()
+        println "Running XTree native tests..."
+        println "=" * 60
         
-        def result = exec {
-            workingDir nativeBuildDir
-            commandLine testExecutable
-            standardOutput = outputStream
-            errorOutput = errorStream
-            ignoreExitValue = true
+        // Run tests with real-time output processing
+        def testCount = 0
+        def passedCount = 0
+        def failedCount = 0
+        def currentSuite = ""
+        def testsFailed = false
+        
+        def proc = new ProcessBuilder(testExecutable)
+            .directory(file(nativeBuildDir))
+            .redirectErrorStream(true)
+            .start()
+        
+        // Process output line by line for real-time updates
+        proc.inputStream.eachLine { line ->
+            // Detect test suite starts
+            if (line =~ /\[----------\]\s+\d+\s+tests?\s+from\s+(\w+)/) {
+                def matcher = line =~ /\[----------\]\s+\d+\s+tests?\s+from\s+(\w+)/
+                currentSuite = matcher[0][1]
+                println "\n${line}"
+            }
+            // Detect individual test starts
+            else if (line =~ /\[\s*RUN\s*\]/) {
+                testCount++
+                print "\r[${testCount}] ${line}"
+                System.out.flush()
+            }
+            // Detect test passes
+            else if (line =~ /\[\s*OK\s*\]/) {
+                passedCount++
+                println " ✓"
+            }
+            // Detect test failures
+            else if (line =~ /\[\s*FAILED\s*\]/) {
+                failedCount++
+                testsFailed = true
+                println " ✗"
+                println line
+            }
+            // Show test summary lines
+            else if (line =~ /\[==========\]/ || line =~ /\[\s*PASSED\s*\]/) {
+                println "\n${line}"
+            }
+            // Show failure details
+            else if (testsFailed && line.trim()) {
+                println line
+            }
+            // Show performance metrics
+            else if (line.contains("operations:") || line.contains("queries:") || 
+                     line.contains("insertion:") || line.contains("Average results")) {
+                println "  ${line}"
+            }
         }
         
-        def output = outputStream.toString()
-        def error = errorStream.toString()
+        proc.waitFor()
         
-        // Print the output
-        println output
-        if (error) {
-            println "STDERR: ${error}"
+        println "=" * 60
+        
+        if (proc.exitValue() != 0 || testsFailed) {
+            throw new GradleException("Tests failed: ${failedCount} failed, ${passedCount} passed out of ${testCount} total")
         }
         
-        // Check if tests passed regardless of exit code
-        if (output.contains("FAILED") || !output.contains("PASSED")) {
-            throw new GradleException("Tests failed - check output above for details")
-        }
-        
-        // Extract test summary for reporting
-        def matcher = output =~ /\[\s*PASSED\s*\]\s*(\d+)\s*tests?/
-        if (matcher) {
-            println "✓ All ${matcher[0][1]} tests passed successfully"
-        }
+        println "✓ All ${passedCount} tests passed successfully!"
     }
 }
 
@@ -178,7 +267,6 @@ task testNative {
 afterEvaluate {
     tasks.build.dependsOn buildNative
     tasks.clean.dependsOn cleanNative
-    tasks.check.dependsOn testNative
     
     // Configure test task to run tests
     task test {
