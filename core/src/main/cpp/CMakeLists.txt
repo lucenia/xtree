@@ -402,12 +402,15 @@ source_group("Tests" FILES ${TEST_SOURCES})
 
 # Shared library target
 if(SRC_FILES)
-add_library(XTree SHARED ${SRC_FILES} ${HEADER_FILES})
-
-# On Windows, we need to export symbols for DLL
+# On Windows, build static library to avoid DLL export issues
+# On other platforms, build shared library
 if(WIN32)
-    set_target_properties(XTree PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+    add_library(XTree STATIC ${SRC_FILES} ${HEADER_FILES})
+else()
+    add_library(XTree SHARED ${SRC_FILES} ${HEADER_FILES})
 endif()
+
+# No need for DLL export settings with static library on Windows
 
 if(DEFINED LIBRARY_OUTPUT_NAME AND DEFINED BASE_VERSION AND DEFINED VERSION_MAJOR)
     if(WIN32)

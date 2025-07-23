@@ -26,6 +26,11 @@ namespace xtree {
     boost::mutex Logger::sm;
     FILE* Logger::logfile;
     thread_specific_ptr<Logger> Logger::tsp;
+    
+#ifdef _WIN32
+    // Explicit template instantiation for Windows DLL export
+    template class boost::thread_specific_ptr<Logger>;
+#endif
 
     const char* logLevelToString( LogLevel l ) {
         switch(l) {
