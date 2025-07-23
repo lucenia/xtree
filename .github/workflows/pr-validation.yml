@@ -81,15 +81,20 @@ jobs:
           # Install CMake with Chocolatey
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
           
-          # Boost comes pre-installed on GitHub runners for MSVC
-          # Just verify vcpkg is available (pre-installed on GitHub runners)
-          echo "Using pre-installed Boost libraries for MSVC"
+          # Download pre-built Boost binaries for MSVC
+          echo "Downloading pre-built Boost 1.83.0 for MSVC..."
+          Invoke-WebRequest -Uri "https://github.com/actions/boost-versions/releases/download/1.83.0-20230815.2/boost-1.83.0-windows-2022-msvc14-x64.tar.gz" -OutFile "boost.tar.gz"
           
-          # Set up for MSVC build with vcpkg (if needed)
-          if (Test-Path "C:/vcpkg") {
-            echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
-            echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $GITHUB_ENV
-          }
+          # Extract Boost
+          New-Item -ItemType Directory -Force -Path "C:\boost"
+          tar -xzf boost.tar.gz -C "C:\boost"
+          
+          # Set environment variables
+          echo "BOOST_ROOT=C:\boost\boost" >> $GITHUB_ENV
+          echo "Boost_INCLUDE_DIR=C:\boost\boost\include" >> $GITHUB_ENV
+          
+          # List contents to verify
+          Get-ChildItem -Path "C:\boost" -Recurse -Depth 2
       
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4

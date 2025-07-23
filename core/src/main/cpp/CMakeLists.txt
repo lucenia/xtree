@@ -255,30 +255,46 @@ if(WIN32 AND NOT CMAKE_TOOLCHAIN_FILE)
     endif()
 endif()
 
-# Additional Windows-specific Boost hints for vcpkg
-if(WIN32 AND EXISTS "C:/vcpkg/installed")
-    # Try to detect the vcpkg triplet
-    if(NOT VCPKG_TARGET_TRIPLET)
-        # Check for MinGW compiler
-        if(MINGW)
-            if(EXISTS "C:/vcpkg/installed/x64-mingw-dynamic")
-                set(VCPKG_TARGET_TRIPLET "x64-mingw-dynamic")
-            elseif(EXISTS "C:/vcpkg/installed/x64-mingw-static")
-                set(VCPKG_TARGET_TRIPLET "x64-mingw-static")
+# Additional Windows-specific Boost hints
+if(WIN32)
+    # Check for vcpkg installation
+    if(EXISTS "C:/vcpkg/installed")
+        # Try to detect the vcpkg triplet
+        if(NOT VCPKG_TARGET_TRIPLET)
+            # Check for MinGW compiler
+            if(MINGW)
+                if(EXISTS "C:/vcpkg/installed/x64-mingw-dynamic")
+                    set(VCPKG_TARGET_TRIPLET "x64-mingw-dynamic")
+                elseif(EXISTS "C:/vcpkg/installed/x64-mingw-static")
+                    set(VCPKG_TARGET_TRIPLET "x64-mingw-static")
+                endif()
+            else()
+                # MSVC compiler
+                if(EXISTS "C:/vcpkg/installed/x64-windows")
+                    set(VCPKG_TARGET_TRIPLET "x64-windows")
+                endif()
             endif()
-        else()
-            # MSVC compiler
-            if(EXISTS "C:/vcpkg/installed/x64-windows")
-                set(VCPKG_TARGET_TRIPLET "x64-windows")
-            endif()
+        endif()
+        
+        # Add vcpkg paths to CMAKE_PREFIX_PATH if triplet found
+        if(VCPKG_TARGET_TRIPLET)
+            list(APPEND CMAKE_PREFIX_PATH "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
+            set(BOOST_ROOT "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
+            message(STATUS "Added vcpkg paths for triplet: ${VCPKG_TARGET_TRIPLET}")
         endif()
     endif()
     
-    # Add vcpkg paths to CMAKE_PREFIX_PATH
-    if(VCPKG_TARGET_TRIPLET)
-        list(APPEND CMAKE_PREFIX_PATH "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
-        set(BOOST_ROOT "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
-        message(STATUS "Added vcpkg paths for triplet: ${VCPKG_TARGET_TRIPLET}")
+    # Check environment variable first
+    if(NOT BOOST_ROOT AND DEFINED ENV{BOOST_ROOT})
+        set(BOOST_ROOT "$ENV{BOOST_ROOT}")
+        message(STATUS "Using BOOST_ROOT from environment: ${BOOST_ROOT}")
+    endif()
+    
+    # For MSVC, set up Boost library naming convention
+    if(MSVC)
+        set(Boost_USE_STATIC_LIBS ON)
+        set(Boost_USE_MULTITHREADED ON)
+        set(Boost_USE_STATIC_RUNTIME OFF)
     endif()
 endif()
 
