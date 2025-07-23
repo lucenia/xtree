@@ -396,11 +396,19 @@ if(SRC_FILES)
 add_library(XTree SHARED ${SRC_FILES} ${HEADER_FILES})
 
 if(DEFINED LIBRARY_OUTPUT_NAME AND DEFINED BASE_VERSION AND DEFINED VERSION_MAJOR)
-    set_target_properties(XTree PROPERTIES
-        OUTPUT_NAME ${LIBRARY_OUTPUT_NAME}
-        VERSION ${BASE_VERSION}
-        SOVERSION ${VERSION_MAJOR}
-    )
+    if(WIN32)
+        # On Windows, set both runtime and import library names
+        set_target_properties(XTree PROPERTIES
+            RUNTIME_OUTPUT_NAME ${LIBRARY_OUTPUT_NAME}
+            ARCHIVE_OUTPUT_NAME XTree  # Keep import library name simple
+        )
+    else()
+        set_target_properties(XTree PROPERTIES
+            OUTPUT_NAME ${LIBRARY_OUTPUT_NAME}
+            VERSION ${BASE_VERSION}
+            SOVERSION ${VERSION_MAJOR}
+        )
+    endif()
 endif()
 
 target_link_libraries(XTree
