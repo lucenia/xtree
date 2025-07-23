@@ -23,7 +23,12 @@
 #include <thread>
 #include <cstdio>
 #include <fstream>
-#include <sys/stat.h>  // for stat() - cross-platform
+#ifdef _WIN32
+#include <sys/stat.h>  // Windows has sys/stat.h but with different functions
+#define stat _stat     // Use _stat instead of stat on Windows
+#else
+#include <sys/stat.h>  // for stat() - POSIX
+#endif
 #include "../src/xtree.h"
 #include "../src/xtree.hpp"
 #include "../src/indexdetails.hpp"

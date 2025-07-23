@@ -791,9 +791,17 @@ private:
         file.close();
         
         // Atomic rename
+#ifdef _WIN32
+        // Windows rename fails if target exists, so delete it first
+        _unlink(persist_file_.c_str());
+        if (_rename(temp_file.c_str(), persist_file_.c_str()) != 0) {
+            throw std::runtime_error("Failed to commit memory snapshot");
+        }
+#else
         if (rename(temp_file.c_str(), persist_file_.c_str()) != 0) {
             throw std::runtime_error("Failed to commit memory snapshot");
         }
+#endif
         
 #ifdef _DEBUG
         std::cout << "Memory snapshot persisted to " << persist_file_ << "\n";

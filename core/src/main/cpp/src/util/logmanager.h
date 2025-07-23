@@ -23,6 +23,10 @@
 #ifndef _WIN32
 #include <cxxabi.h>
 #include <sys/file.h>
+#else
+#include <windows.h>
+#include <io.h>
+#include <fcntl.h>
 #endif
 
 #//define BOOST_NO_CXX11_SCOPED_ENUMS
@@ -46,9 +50,11 @@ namespace xtree {
             }
             else {
 #ifdef _WIN32
-            	lp = string(getenv("ACCUMULO_HOME")) + "\\logs\\xtree.log";
+            	const char* accumuloHome = getenv("ACCUMULO_HOME");
+            	lp = string(accumuloHome ? accumuloHome : ".") + "\\logs\\xtree.log";
 #else
-            	lp = string(getenv("ACCUMULO_HOME")) + "/logs/xtree.log";
+            	const char* accumuloHome = getenv("ACCUMULO_HOME");
+            	lp = string(accumuloHome ? accumuloHome : ".") + "/logs/xtree.log";
 #endif
             }
             cout << lp << endl;
@@ -61,10 +67,17 @@ namespace xtree {
         }
 
         void time_t_to_Struct(time_t t, struct tm *buf, bool local=false) {
+#ifdef _WIN32
+            if ( local )
+                localtime_s(buf, &t);
+            else
+                gmtime_s(buf, &t);
+#else
             if ( local )
                 localtime_r(&t, buf);
             else
                 gmtime_r(&t, buf);
+#endif
         }
 
         string terseCurrentTime(bool colonsOk=true) {
@@ -82,7 +95,12 @@ namespace xtree {
 
             bool exists = boost::filesystem::exists(lp);
 
+#ifdef _WIN32
+            FILE * test = nullptr;
+            fopen_s(&test, lp.c_str(), _append ? "a" : "w");
+#else
             FILE * test = fopen( lp.c_str() , _append ? "a" : "w" );
+#endif
             if ( ! test ) {
                 if (boost::filesystem::is_directory(lp)) {
                     cout << "logpath [" << lp << "] should be a file name not a directory" << endl;
@@ -114,7 +132,7 @@ namespace xtree {
 
             if ( _file ) {
 
-#ifdef POSIX_FADV_DONTNEED
+#if defined(POSIX_FADV_DONTNEED) && !defined(_WIN32)
                 posix_fadvise(fileno(_file), 0, 0, POSIX_FADV_DONTNEED);
 #endif
 
@@ -123,7 +141,13 @@ namespace xtree {
                 ss << _path << "." << terseCurrentTime( false );
                 string s = ss.str();
                 cout << "renaming" << endl;
-                rename( _path.c_str() , s.c_str() );
+#ifdef _WIN32
+                // On Windows, rename fails if target exists
+                _unlink(s.c_str());  // Delete target if it exists
+                _rename(_path.c_str(), s.c_str());
+#else
+                rename(_path.c_str(), s.c_str());
+#endif
             }
 
             FILE* tmp = 0;  // The new file using the original logpath name
