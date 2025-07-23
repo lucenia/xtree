@@ -75,22 +75,23 @@ jobs:
         if: matrix.os == 'windows-latest'
         uses: ilammy/msvc-dev-cmd@v1
       
+      - name: Install Boost (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: MarkusJx/install-boost@v2.4.5
+        id: install-boost
+        with:
+          boost_version: 1.83.0
+          toolset: msvc
+          platform_version: 2022
+          boost_install_dir: C:\boost
+      
       - name: Install dependencies (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
           
-          # Download pre-built Boost binaries for MSVC
-          echo "Downloading pre-built Boost 1.83.0 for MSVC..."
-          Invoke-WebRequest -Uri "https://github.com/actions/boost-versions/releases/download/1.83.0-20230815.2/boost-1.83.0-windows-2022-msvc14-x64.tar.gz" -OutFile "boost.tar.gz"
-          
-          # Extract Boost
-          New-Item -ItemType Directory -Force -Path "C:\boost"
-          tar -xzf boost.tar.gz -C "C:\boost"
-          
-          # Set environment variables
-          echo "BOOST_ROOT=C:\boost\boost" >> $GITHUB_ENV
-          echo "Boost_INCLUDE_DIR=C:\boost\boost\include" >> $GITHUB_ENV
+          # Set Boost environment variables
+          echo "BOOST_ROOT=${{ steps.install-boost.outputs.BOOST_ROOT }}" >> $GITHUB_ENV
       
       - name: Get version from tag
         id: get_version
