@@ -69,6 +69,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         uses: ilammy/msvc-dev-cmd@v1
       
+      - name: Install CMake (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
+      
       - name: Install Boost (Windows)
         if: matrix.os == 'windows-latest'
         uses: MarkusJx/install-boost@v2.4.5
@@ -79,11 +84,9 @@ jobs:
           platform_version: 2022
           boost_install_dir: C:\boost
       
-      - name: Install dependencies (Windows)
+      - name: Configure environment (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
-          
           # Set Boost environment variables
           echo "BOOST_ROOT=${{ steps.install-boost.outputs.BOOST_ROOT }}" >> $GITHUB_ENV
       
