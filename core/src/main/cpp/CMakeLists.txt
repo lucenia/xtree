@@ -238,6 +238,21 @@ endif()
 if(WIN32 AND CMAKE_TOOLCHAIN_FILE)
     # Ensure we use the vcpkg provided Boost
     set(Boost_NO_SYSTEM_PATHS ON)
+    message(STATUS "Using vcpkg toolchain for Boost discovery")
+endif()
+
+# Fallback: Try to find vcpkg installation on Windows if toolchain not set
+if(WIN32 AND NOT CMAKE_TOOLCHAIN_FILE)
+    # Check common vcpkg installation paths
+    if(EXISTS "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
+        set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
+        set(Boost_NO_SYSTEM_PATHS ON)
+        message(STATUS "Found vcpkg toolchain at C:/vcpkg, using for Boost")
+    elseif(EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+        set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+        set(Boost_NO_SYSTEM_PATHS ON)
+        message(STATUS "Found vcpkg toolchain via VCPKG_ROOT, using for Boost")
+    endif()
 endif()
 
 find_package(Boost 1.58 REQUIRED COMPONENTS system filesystem thread iostreams)

@@ -25,15 +25,34 @@ def detectSystemPageSize() {
         def os = System.getProperty("os.name").toLowerCase()
         def arch = System.getProperty("os.arch").toLowerCase()
         
+        // Debug logging
+        println "Detecting page size for OS: ${os}, Architecture: ${arch}"
+        
         if (os.contains("win")) {
             // Windows typically uses 4KB
             return 4096
         } else if (os.contains("mac")) {
-            if (arch.contains("aarch64") || arch.contains("arm")) {
+            // For macOS, also try getconf to get actual page size
+            try {
+                def process = "getconf PAGESIZE".execute()
+                process.waitFor()
+                if (process.exitValue() == 0) {
+                    def actualPageSize = process.text.trim().toInteger()
+                    println "getconf PAGESIZE returned: ${actualPageSize}"
+                    return actualPageSize
+                }
+            } catch (Exception e) {
+                println "getconf failed: ${e.message}"
+            }
+            
+            // Fallback to architecture-based detection
+            if (arch.contains("aarch64") || arch.contains("arm") || arch.contains("arm64")) {
                 // Apple Silicon uses 16KB pages
+                println "Detected Apple Silicon, using 16KB pages"
                 return 16384
             } else {
                 // Intel Macs use 4KB
+                println "Detected Intel Mac, using 4KB pages"
                 return 4096
             }
         } else {
