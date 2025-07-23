@@ -17,11 +17,11 @@
  * https://www.gnu.org/licenses/agpl-3.0.html
  */
 
-#include "indexdetails.hpp"
+#include "cow_memmgr.hpp"
 
 namespace xtree {
 
-    // Template static member definitions
-    // Note: Explicit specializations are provided by each compilation unit that uses them
+// Initialize page size at runtime (definition must be in a single translation unit)
+const size_t PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE = PageAlignedMemoryTracker::get_page_size();
 
-}
+} // namespace xtree

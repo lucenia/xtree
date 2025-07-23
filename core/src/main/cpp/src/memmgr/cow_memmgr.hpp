@@ -79,24 +79,20 @@ public:
         bool is_huge_page;
     };
     
-    // Get page size at compile time where possible
-    // Users can override by defining XTREE_PAGE_SIZE
-#ifdef XTREE_PAGE_SIZE
-    static constexpr size_t PAGE_SIZE = XTREE_PAGE_SIZE;
-#elif defined(__APPLE__) && defined(__arm64__)
-    // Apple Silicon uses 16KB pages
-    static constexpr size_t PAGE_SIZE = 16384;
-#elif defined(_WIN32)
-    // Windows x86/x64 uses 4KB pages (Large pages are opt-in)
-    static constexpr size_t PAGE_SIZE = 4096;
-#elif defined(__linux__) && defined(__aarch64__)
-    // ARM64 Linux can use 4KB, 16KB, or 64KB
-    // Default to 4KB - safest for alignment
-    static constexpr size_t PAGE_SIZE = 4096;
+    // Get page size at runtime for maximum compatibility
+    static size_t get_page_size() {
+#ifdef _WIN32
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        return si.dwPageSize;
 #else
-    // Default to 4KB - most common page size
-    static constexpr size_t PAGE_SIZE = 4096;
+        long page_size = sysconf(_SC_PAGESIZE);
+        return (page_size > 0) ? static_cast<size_t>(page_size) : 4096;
 #endif
+    }
+    
+    // Page size determined at runtime
+    static const size_t RUNTIME_PAGE_SIZE;
     
     // Use unordered_map for O(1) lookups by address
     std::unordered_map<void*, MemoryRegion> tracked_regions_;
@@ -115,7 +111,7 @@ private:
 
 public:
     PageAlignedMemoryTracker() 
-        : write_tracker_(std::make_unique<PageWriteTracker>(PAGE_SIZE)) {}
+        : write_tracker_(std::make_unique<PageWriteTracker>(RUNTIME_PAGE_SIZE)) {}
     
     ~PageAlignedMemoryTracker() {
         // Disable COW protection on all regions before destruction
@@ -135,9 +131,9 @@ public:
         
         // Align to page boundaries
         uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
-        uintptr_t aligned_start = start & ~(PAGE_SIZE - 1);  // Round down
+        uintptr_t aligned_start = start & ~(RUNTIME_PAGE_SIZE - 1);  // Round down
         uintptr_t end = start + size;
-        uintptr_t aligned_end = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);  // Round up
+        uintptr_t aligned_end = (end + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);  // Round up
         
         MemoryRegion region{};
         region.start_addr = reinterpret_cast<void*>(aligned_start);
@@ -170,9 +166,9 @@ public:
         for (const auto& [ptr, size] : batch_registration_.pending_regions) {
             // Align to page boundaries
             uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
-            uintptr_t aligned_start = start & ~(PAGE_SIZE - 1);
+            uintptr_t aligned_start = start & ~(RUNTIME_PAGE_SIZE - 1);
             uintptr_t end = start + size;
-            uintptr_t aligned_end = (end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+            uintptr_t aligned_end = (end + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);
             
             MemoryRegion region{};
             region.start_addr = reinterpret_cast<void*>(aligned_start);
@@ -242,7 +238,7 @@ public:
         
         // Align the pointer to find the key
         uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-        uintptr_t aligned_addr = addr & ~(PAGE_SIZE - 1);
+        uintptr_t aligned_addr = addr & ~(RUNTIME_PAGE_SIZE - 1);
         void* key = reinterpret_cast<void*>(aligned_addr);
         
         auto it = tracked_regions_.find(key);
@@ -282,7 +278,7 @@ public:
         for (const auto& [ptr, _] : batch_registration_.pending_regions) {
             // Align the pointer to find the key
             uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-            uintptr_t aligned_addr = addr & ~(PAGE_SIZE - 1);
+            uintptr_t aligned_addr = addr & ~(RUNTIME_PAGE_SIZE - 1);
             void* key = reinterpret_cast<void*>(aligned_addr);
             
             auto it = tracked_regions_.find(key);
@@ -330,11 +326,11 @@ public:
     
     // Allocate page-aligned memory
     static void* allocate_aligned(size_t size) {
-        size_t aligned_size = (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+        size_t aligned_size = (size + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);
 #ifdef _WIN32
-        return _aligned_malloc(aligned_size, PAGE_SIZE);
+        return _aligned_malloc(aligned_size, RUNTIME_PAGE_SIZE);
 #else
-        return std::aligned_alloc(PAGE_SIZE, aligned_size);
+        return std::aligned_alloc(RUNTIME_PAGE_SIZE, aligned_size);
 #endif
     }
     
@@ -394,7 +390,7 @@ public:
                           const std::string& persist_file = "xtree_memory.snapshot")
         : index_details_(index_details), persist_file_(persist_file),
           batch_coordinator_(std::make_unique<BatchUpdateCoordinator<Record>>(
-              PageAlignedMemoryTracker::PAGE_SIZE)) {
+              PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE)) {
         // Start persistent background thread for periodic snapshots
         start_background_thread();
     }
@@ -642,7 +638,7 @@ public:
             }
             
             // Validate root_address is reasonable (should be at least one page)
-            if (header.root_address != 0 && header.root_address < PageAlignedMemoryTracker::PAGE_SIZE) {
+            if (header.root_address != 0 && header.root_address < PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE) {
                 return false; // Suspicious low address - likely corrupted
             }
             

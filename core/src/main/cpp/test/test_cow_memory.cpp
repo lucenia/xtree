@@ -177,7 +177,7 @@ TEST_F(COWMemoryTest, COWAllocatorTest) {
     ASSERT_NE(data, nullptr);
     
     // Should be page-aligned
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(data) % 4096, 0);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(data) % PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE, 0);
     
     // Fill with test data
     for (int i = 0; i < 1000; i++) {
@@ -352,8 +352,9 @@ TEST_F(COWMemoryTest, BatchRegistration) {
         const int BATCH_SIZE = 100;
         
         // Allocate memory regions
+        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
         for (int i = 0; i < BATCH_SIZE; i++) {
-            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(page_size);
             ASSERT_NE(mem, nullptr);
             allocations.push_back(mem);
         }
@@ -361,13 +362,13 @@ TEST_F(COWMemoryTest, BatchRegistration) {
         // Register as batch
         cow_manager->begin_batch_registration();
         for (auto ptr : allocations) {
-            cow_manager->add_to_batch(ptr, 4096);
+            cow_manager->add_to_batch(ptr, page_size);
         }
         cow_manager->commit_batch_registration();
         
         // Verify all regions were registered
         auto stats = cow_manager->get_stats();
-        size_t expected_memory = initial_memory + (BATCH_SIZE * 4096);
+        size_t expected_memory = initial_memory + (BATCH_SIZE * page_size);
         EXPECT_EQ(stats.tracked_memory_bytes, expected_memory);
         
         // Clean up
@@ -380,20 +381,21 @@ TEST_F(COWMemoryTest, BatchRegistration) {
     // Test 2: Compare batch vs individual registration performance
     {
         const int PERF_BATCH_SIZE = 1000;
+        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
         vector<void*> batch_allocs;
         vector<void*> individual_allocs;
         
         // Allocate memory for both tests
         for (int i = 0; i < PERF_BATCH_SIZE; i++) {
-            batch_allocs.push_back(PageAlignedMemoryTracker::allocate_aligned(4096));
-            individual_allocs.push_back(PageAlignedMemoryTracker::allocate_aligned(4096));
+            batch_allocs.push_back(PageAlignedMemoryTracker::allocate_aligned(page_size));
+            individual_allocs.push_back(PageAlignedMemoryTracker::allocate_aligned(page_size));
         }
         
         // Time batch registration
         auto batch_start = std::chrono::high_resolution_clock::now();
         cow_manager->begin_batch_registration();
         for (auto ptr : batch_allocs) {
-            cow_manager->add_to_batch(ptr, 4096);
+            cow_manager->add_to_batch(ptr, page_size);
         }
         cow_manager->commit_batch_registration();
         auto batch_end = std::chrono::high_resolution_clock::now();
@@ -402,7 +404,7 @@ TEST_F(COWMemoryTest, BatchRegistration) {
         // Time individual registration
         auto individual_start = std::chrono::high_resolution_clock::now();
         for (auto ptr : individual_allocs) {
-            cow_manager->register_bucket_memory(ptr, 4096);
+            cow_manager->register_bucket_memory(ptr, page_size);
         }
         auto individual_end = std::chrono::high_resolution_clock::now();
         auto individual_duration = std::chrono::duration_cast<std::chrono::microseconds>(individual_end - individual_start);
@@ -430,13 +432,14 @@ TEST_F(COWMemoryTest, BatchRegistration) {
     {
         vector<void*> snapshot_allocs;
         const int SNAPSHOT_BATCH_SIZE = 50;
+        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
         
         // Register batch of memory
         cow_manager->begin_batch_registration();
         for (int i = 0; i < SNAPSHOT_BATCH_SIZE; i++) {
-            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(page_size);
             snapshot_allocs.push_back(mem);
-            cow_manager->add_to_batch(mem, 4096);
+            cow_manager->add_to_batch(mem, page_size);
         }
         cow_manager->commit_batch_registration();
         
@@ -465,19 +468,20 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
         
         vector<void*> allocations;
         const int BATCH_SIZE = 100;
+        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
         
         // Allocate and register memory
         cow_manager->begin_batch_registration();
         for (int i = 0; i < BATCH_SIZE; i++) {
-            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(page_size);
             allocations.push_back(mem);
-            cow_manager->add_to_batch(mem, 4096);
+            cow_manager->add_to_batch(mem, page_size);
         }
         cow_manager->commit_batch_registration();
         
         // Verify memory is tracked
         auto mid_stats = cow_manager->get_stats();
-        EXPECT_EQ(mid_stats.tracked_memory_bytes, initial_memory + (BATCH_SIZE * 4096));
+        EXPECT_EQ(mid_stats.tracked_memory_bytes, initial_memory + (BATCH_SIZE * page_size));
         
         // Batch unregister all
         cow_manager->begin_batch_unregistration();
@@ -499,6 +503,7 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
     // Test 2: Memory leak detection - ensure unregistered memory doesn't leak tracking
     {
         const int LEAK_TEST_SIZE = 500;
+        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
         vector<void*> leak_test_allocs;
         
         auto initial_stats = cow_manager->get_stats();
@@ -506,14 +511,14 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
         
         // Register many allocations
         for (int i = 0; i < LEAK_TEST_SIZE; i++) {
-            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(page_size);
             leak_test_allocs.push_back(mem);
-            cow_manager->register_bucket_memory(mem, 4096);
+            cow_manager->register_bucket_memory(mem, page_size);
         }
         
         // Verify all are tracked
         auto mid_stats = cow_manager->get_stats();
-        EXPECT_EQ(mid_stats.tracked_memory_bytes, initial_memory + (LEAK_TEST_SIZE * 4096));
+        EXPECT_EQ(mid_stats.tracked_memory_bytes, initial_memory + (LEAK_TEST_SIZE * page_size));
         
         // Unregister half individually, half in batch
         int half = LEAK_TEST_SIZE / 2;
@@ -543,13 +548,14 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
     // Test 3: COW protection cleanup on unregistration
     {
         const int PROTECTION_TEST_SIZE = 10;
+        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
         vector<void*> protected_allocs;
         
         // Allocate and register memory
         for (int i = 0; i < PROTECTION_TEST_SIZE; i++) {
-            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(page_size);
             protected_allocs.push_back(mem);
-            cow_manager->register_bucket_memory(mem, 4096);
+            cow_manager->register_bucket_memory(mem, page_size);
         }
         
         // Enable COW protection
@@ -577,6 +583,7 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
     {
         const int STRESS_CYCLES = 100;
         const int ALLOCS_PER_CYCLE = 50;
+        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
         
         auto initial_stats = cow_manager->get_stats();
         size_t initial_memory = initial_stats.tracked_memory_bytes;
@@ -587,16 +594,16 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
             // Batch register
             cow_manager->begin_batch_registration();
             for (int i = 0; i < ALLOCS_PER_CYCLE; i++) {
-                void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+                void* mem = PageAlignedMemoryTracker::allocate_aligned(page_size);
                 cycle_allocs.push_back(mem);
-                cow_manager->add_to_batch(mem, 4096);
+                cow_manager->add_to_batch(mem, page_size);
             }
             cow_manager->commit_batch_registration();
             
             // Verify tracked
             auto mid_stats = cow_manager->get_stats();
             EXPECT_EQ(mid_stats.tracked_memory_bytes, 
-                     initial_memory + (ALLOCS_PER_CYCLE * 4096));
+                     initial_memory + (ALLOCS_PER_CYCLE * page_size));
             
             // Batch unregister
             cow_manager->begin_batch_unregistration();

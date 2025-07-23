@@ -36,19 +36,22 @@ using namespace std::chrono;
 
 class PageWriteTrackerTest : public ::testing::Test {
 protected:
-    static constexpr size_t TEST_PAGE_SIZE = PageAlignedMemoryTracker::PAGE_SIZE;
+    static const size_t TEST_PAGE_SIZE;
     
     void SetUp() override {
-        tracker = make_unique<PageWriteTracker>(TEST_PAGE_SIZE);
+        tracker = make_unique<PageWriteTracker>(PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE);
     }
     
     unique_ptr<PageWriteTracker> tracker;
 };
 
+const size_t PageWriteTrackerTest::TEST_PAGE_SIZE = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+
 // Test basic write tracking
 TEST_F(PageWriteTrackerTest, BasicWriteTracking) {
-    void* page1 = reinterpret_cast<void*>(0x1000);
-    void* page2 = reinterpret_cast<void*>(0x2000);
+    // Use page-aligned addresses based on actual page size
+    void* page1 = reinterpret_cast<void*>(TEST_PAGE_SIZE);
+    void* page2 = reinterpret_cast<void*>(TEST_PAGE_SIZE * 2);
     
     // Track writes
     for (int i = 0; i < 5; i++) {
@@ -116,9 +119,10 @@ TEST_F(PageWriteTrackerTest, AccessTracking) {
 // Test page alignment
 TEST_F(PageWriteTrackerTest, PageAlignment) {
     // All these addresses should map to the same page
-    void* addr1 = reinterpret_cast<void*>(0x1000);
-    void* addr2 = reinterpret_cast<void*>(0x1100);
-    void* addr3 = reinterpret_cast<void*>(0x1FFF);
+    // Use addresses within the first page
+    void* addr1 = reinterpret_cast<void*>(TEST_PAGE_SIZE);
+    void* addr2 = reinterpret_cast<void*>(TEST_PAGE_SIZE + 0x100);
+    void* addr3 = reinterpret_cast<void*>(TEST_PAGE_SIZE + TEST_PAGE_SIZE - 1);
     
     tracker->record_write(addr1);
     tracker->record_write(addr2);
@@ -130,7 +134,7 @@ TEST_F(PageWriteTrackerTest, PageAlignment) {
 
 // Test batch update coordinator
 TEST(BatchUpdateCoordinatorTest, BasicBatching) {
-    BatchUpdateCoordinator<int> coordinator(PageAlignedMemoryTracker::PAGE_SIZE);
+    BatchUpdateCoordinator<int> coordinator(PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE);
     
     vector<int> values(10, 0);
     
@@ -178,7 +182,7 @@ TEST(HugePageAllocatorTest, BasicAllocation) {
 class COWPrefaultPerformanceTest : public ::testing::Test {
 protected:
     static constexpr size_t NUM_PAGES = 100;
-    static constexpr size_t PAGE_SIZE = PageAlignedMemoryTracker::PAGE_SIZE;
+    static const size_t PAGE_SIZE;
     
     vector<void*> allocations;
     unique_ptr<DirectMemoryCOWManager<DataRecord>> cow_manager;
@@ -216,6 +220,8 @@ protected:
         std::remove("test_prefault.snapshot");
     }
 };
+
+const size_t COWPrefaultPerformanceTest::PAGE_SIZE = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
 
 TEST_F(COWPrefaultPerformanceTest, PrefaultBenefit) {
     // Make some pages "hot" by writing to them frequently
@@ -318,15 +324,17 @@ TEST_F(COWPrefaultPerformanceTest, BatchUpdateBenefit) {
 // Test memory leak prevention in tracking system
 TEST(MemoryLeakTest, NoLeaksInTrackingSystem) {
     // Create and destroy multiple COW managers to test cleanup
+    const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+    
     for (int i = 0; i < 5; i++) {
         auto cow_manager = make_unique<DirectMemoryCOWManager<DataRecord>>(nullptr, "leak_test.snapshot");
         
         // Allocate and register memory
         vector<void*> allocations;
         for (int j = 0; j < 100; j++) {
-            void* mem = PageAlignedMemoryTracker::allocate_aligned(4096);
+            void* mem = PageAlignedMemoryTracker::allocate_aligned(page_size);
             allocations.push_back(mem);
-            cow_manager->register_bucket_memory(mem, 4096);
+            cow_manager->register_bucket_memory(mem, page_size);
         }
         
         // Track some writes
@@ -346,7 +354,7 @@ TEST(MemoryLeakTest, NoLeaksInTrackingSystem) {
         
         // Verify tracking
         auto stats = cow_manager->get_stats();
-        EXPECT_EQ(stats.tracked_memory_bytes, 100 * 4096);
+        EXPECT_EQ(stats.tracked_memory_bytes, 100 * page_size);
         
         // Clean up allocations
         for (void* mem : allocations) {

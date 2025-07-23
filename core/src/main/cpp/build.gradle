@@ -32,6 +32,22 @@ def detectSystemPageSize() {
             // Windows typically uses 4KB
             return 4096
         } else if (os.contains("mac")) {
+            // Check actual CPU architecture using uname
+            try {
+                def unameProcess = "uname -m".execute()
+                unameProcess.waitFor()
+                if (unameProcess.exitValue() == 0) {
+                    def cpuArch = unameProcess.text.trim()
+                    println "CPU architecture (uname -m): ${cpuArch}"
+                    if (cpuArch == "arm64") {
+                        println "Detected Apple Silicon (native ARM64), using 16KB pages"
+                        return 16384
+                    }
+                }
+            } catch (Exception e) {
+                println "uname check failed: ${e.message}"
+            }
+            
             // For macOS, also try getconf to get actual page size
             try {
                 def process = "getconf PAGESIZE".execute()
@@ -125,7 +141,14 @@ task compileNative(type: Exec) {
     description = "Compile the native XTree shared library"
     dependsOn configureNative
     workingDir nativeBuildDir
-    commandLine 'cmake', '--build', '.'
+    
+    // Enable parallel build using all available CPU cores
+    def parallelJobs = Runtime.runtime.availableProcessors()
+    commandLine 'cmake', '--build', '.', '--parallel', parallelJobs.toString()
+    
+    doFirst {
+        println "Building with ${parallelJobs} parallel jobs"
+    }
 }
 
 task buildNative(dependsOn: compileNative) {
