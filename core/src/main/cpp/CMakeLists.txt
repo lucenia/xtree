@@ -248,19 +248,15 @@ if(WIN32 AND CMAKE_TOOLCHAIN_FILE)
     message(STATUS "Using vcpkg toolchain for Boost discovery")
 endif()
 
-# Fallback: Try to find vcpkg installation on Windows if toolchain not set
+# Enable vcpkg auto-detection for better Boost support
 if(WIN32 AND NOT CMAKE_TOOLCHAIN_FILE)
     # Check common vcpkg installation paths
     if(EXISTS "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
         set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
         message(STATUS "Found vcpkg toolchain at C:/vcpkg, using for Boost")
-        # Include the toolchain file to set up vcpkg paths
-        include("${CMAKE_TOOLCHAIN_FILE}")
     elseif(EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
         set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
         message(STATUS "Found vcpkg toolchain via VCPKG_ROOT, using for Boost")
-        # Include the toolchain file to set up vcpkg paths
-        include("${CMAKE_TOOLCHAIN_FILE}")
     endif()
 endif()
 
@@ -308,6 +304,11 @@ if(WIN32)
 endif()
 
 # Try to find Boost with vcpkg first
+# Use legacy FindBoost module for better compatibility
+cmake_policy(SET CMP0167 OLD)
+set(Boost_USE_STATIC_LIBS OFF)
+set(Boost_USE_MULTITHREADED ON) 
+set(Boost_USE_STATIC_RUNTIME OFF)
 find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
 
 # If not found and on Windows, try alternative approaches
@@ -349,6 +350,19 @@ if(Boost_FOUND)
     # Also add to compile definitions for better Windows support
     if(WIN32)
         add_compile_definitions(BOOST_ALL_NO_LIB)
+        # Fix conflicts between Boost and Windows headers
+        add_compile_definitions(BOOST_DATE_TIME_NO_LIB)
+        add_compile_definitions(BOOST_REGEX_NO_LIB)
+        add_compile_definitions(WIN32_LEAN_AND_MEAN)
+        add_compile_definitions(NOMINMAX)
+        # Use Boost's old xtime implementation to avoid conflicts
+        add_compile_definitions(BOOST_THREAD_DONT_USE_CHRONO)
+        # Additional thread compatibility fixes
+        add_compile_definitions(BOOST_THREAD_VERSION=5)
+        add_compile_definitions(_WIN32_WINNT=0x0601)
+        # Workaround for MPL preprocessed header path issues
+        add_compile_definitions(BOOST_MPL_CFG_NO_PREPROCESSED_HEADERS)
+        add_compile_definitions(BOOST_MPL_LIMIT_STRING_SIZE=128)
     endif()
     
     link_directories(${Boost_LIBRARY_DIRS})
@@ -462,6 +476,7 @@ set(GTEST_SOURCES
     test/test_cow_memory.cpp
     test/test_page_write_tracker.cpp
     test/test_cow_integration.cpp
+    test/test_symbols.cpp
 )
 
 add_executable(xtree_tests ${GTEST_SOURCES})

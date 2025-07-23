@@ -116,7 +116,7 @@ namespace xtree {
          * converts time_t to a string
          */
         inline string time_t_to_String(time_t t = time(0), bool local=false) {
-            char buf[25];
+            char buf[26];
 #if defined(_WIN32)
             ctime_s(buf, sizeof(buf), &t);
 #else

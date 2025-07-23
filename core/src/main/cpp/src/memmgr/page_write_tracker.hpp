@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <array>
 #include <thread>
+#include <chrono>
 
 #ifdef __linux__
 #include <sys/mman.h>
@@ -202,7 +203,7 @@ private:
         
         PageStats* find(void* page) {
             for (auto& entry : entries) {
-                if (entry.page == page) {
+                if (entry.page == page && entry.stats != nullptr) {
                     entry.access_count++;
                     return entry.stats;
                 }
@@ -251,25 +252,43 @@ private:
     size_t hash_page(void* page) const {
         // Fast hash function for aligned addresses
         uintptr_t addr = reinterpret_cast<uintptr_t>(page);
-        addr >>= 12; // Remove page offset bits
+        // Use page_size_ bits instead of hardcoded 12 for Windows compatibility
+        size_t page_bits = 0;
+        size_t temp_size = page_size_;
+        while (temp_size > 1) {
+            temp_size >>= 1;
+            page_bits++;
+        }
+        addr >>= page_bits; // Remove page offset bits based on actual page size
         return (addr * 2654435761ULL) & (HASH_TABLE_SIZE - 1);
     }
     
     PageStats* find_or_create_stats(void* page) {
         size_t bucket = hash_page(page);
         
-        // Debug logging
-        // if (reinterpret_cast<uintptr_t>(page) == 0x1000) {
-        //     std::cout << "[DEBUG] find_or_create_stats: page=0x1000, bucket=" << bucket 
-        //               << ", hash_table_[bucket]=" << hash_table_[bucket].load() << std::endl;
-        // }
+        // Try to find existing entry first - multiple passes to handle Windows threading issues
+        for (int retry = 0; retry < 3; retry++) {
+            HashEntry* current = hash_table_[bucket].load(std::memory_order_acquire);
+            while (current) {
+                void* entry_page = current->page.load(std::memory_order_acquire);
+                if (entry_page == page) {
+                    return &current->stats;
+                }
+                current = current->next.load(std::memory_order_acquire);
+            }
+            
+            // Small delay on Windows to handle potential timing issues
+            if (retry < 2) {
+                std::this_thread::yield();
+            }
+        }
         
-        // Try to find existing entry
+        // Now try to create new entry
         HashEntry* current = hash_table_[bucket].load(std::memory_order_acquire);
         HashEntry* prev = nullptr;
         
         while (current) {
-            void* entry_page = current->page.load(std::memory_order_relaxed);
+            void* entry_page = current->page.load(std::memory_order_acquire);
             if (entry_page == page) {
                 return &current->stats;
             }
@@ -277,8 +296,8 @@ private:
                 // Try to claim this entry
                 void* expected = nullptr;
                 if (current->page.compare_exchange_strong(expected, page,
-                                                         std::memory_order_release,
-                                                         std::memory_order_relaxed)) {
+                                                         std::memory_order_acq_rel,
+                                                         std::memory_order_acquire)) {
                     // Reset stats for reused entry
                     current->stats = PageStats{};
                     return &current->stats;
@@ -398,9 +417,7 @@ public:
     void record_write(void* ptr) {
         void* page = get_page_base(ptr);
         
-        // if (reinterpret_cast<uintptr_t>(page) == 0x1000) {
-        //     std::cout << "[DEBUG] record_write: ptr=" << ptr << ", page=" << page << std::endl;
-        // }
+        // Debug output removed for production
         
         // Check thread-local cache first
         auto& tl_cache = get_tl_cache();
@@ -408,6 +425,9 @@ public:
         if (!stats) {
             stats = find_or_create_stats(page);
             tl_cache.insert(page, stats);
+            // Stats created successfully
+        } else {
+            // Found cached stats
         }
         
         // Lock-free updates

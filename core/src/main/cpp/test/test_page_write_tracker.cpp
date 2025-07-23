@@ -53,6 +53,8 @@ TEST_F(PageWriteTrackerTest, BasicWriteTracking) {
     void* page1 = reinterpret_cast<void*>(TEST_PAGE_SIZE);
     void* page2 = reinterpret_cast<void*>(TEST_PAGE_SIZE * 2);
     
+    // Test addresses are now correctly set
+    
     // Track writes
     for (int i = 0; i < 5; i++) {
         tracker->record_write(page1);
