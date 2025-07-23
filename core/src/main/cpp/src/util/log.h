@@ -26,7 +26,7 @@ namespace xtree {
     class LogManager;
 
     enum LogLevel {
-        DEBUG, INFO, WARNING, ERROR, SEVERE
+        LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERROR, LOG_SEVERE
     };
 
     class Tee {
@@ -206,7 +206,7 @@ namespace xtree {
         }
         void _init() {
             ss.str("");
-            logLevel = INFO;
+            logLevel = LOG_INFO;
             _threadName = "XTREE_NATIVE";
         }
     public:
@@ -256,11 +256,11 @@ namespace xtree {
     }
 
     inline ILogger& error() {
-        return log( ERROR );
+        return log( LOG_ERROR );
     }
 
     inline ILogger& warning() {
-        return log( WARNING );
+        return log( LOG_WARNING );
     }
 
     extern const char * (*getcurns)();

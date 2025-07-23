@@ -29,14 +29,14 @@ namespace xtree {
 
     const char* logLevelToString( LogLevel l ) {
         switch(l) {
-        case DEBUG:
-        case INFO:
+        case LOG_DEBUG:
+        case LOG_INFO:
             return "";
-        case WARNING:
+        case LOG_WARNING:
             return "warning";
-        case ERROR:
+        case LOG_ERROR:
             return "ERROR";
-        case SEVERE:
+        case LOG_SEVERE:
             return "SEVERE";
         default:
             return "UNKNOWN";
