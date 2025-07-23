@@ -231,7 +231,17 @@ task testNative {
         // Platform-specific test executable path
         def testExecutable = "${nativeBuildDir}/bin/xtree_tests"
         if (System.getProperty("os.name").toLowerCase().contains("windows")) {
-            testExecutable = "${nativeBuildDir}/bin/Release/xtree_tests.exe"
+            // Check both possible locations on Windows
+            def releaseExe = "${nativeBuildDir}/bin/Release/xtree_tests.exe"
+            def directExe = "${nativeBuildDir}/bin/xtree_tests.exe"
+            
+            if (file(releaseExe).exists()) {
+                testExecutable = releaseExe
+            } else if (file(directExe).exists()) {
+                testExecutable = directExe
+            } else {
+                throw new GradleException("Test executable not found at ${releaseExe} or ${directExe}")
+            }
         }
         
         if (!file(testExecutable).exists()) {
