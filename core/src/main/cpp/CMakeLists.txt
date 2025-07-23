@@ -404,6 +404,11 @@ source_group("Tests" FILES ${TEST_SOURCES})
 if(SRC_FILES)
 add_library(XTree SHARED ${SRC_FILES} ${HEADER_FILES})
 
+# On Windows, we need to export symbols for DLL
+if(WIN32)
+    set_target_properties(XTree PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
+endif()
+
 if(DEFINED LIBRARY_OUTPUT_NAME AND DEFINED BASE_VERSION AND DEFINED VERSION_MAJOR)
     if(WIN32)
         # On Windows, set both runtime and import library names
@@ -456,11 +461,6 @@ set(GTEST_SOURCES
     test/test_cow_integration.cpp
 )
 
-# On Windows, ensure we can find the import library
-if(WIN32)
-    link_directories(${CMAKE_ARCHIVE_OUTPUT_DIRECTORY})
-endif()
-
 add_executable(xtree_tests ${GTEST_SOURCES})
 
 target_link_libraries(xtree_tests 
@@ -479,7 +479,9 @@ include(GoogleTest)
 # Install
 if(TARGET XTree)
 install(TARGETS XTree
-    LIBRARY DESTINATION lib/native/xtree
+    RUNTIME DESTINATION bin  # for DLLs on Windows
+    LIBRARY DESTINATION lib/native/xtree  # for shared libraries on Unix
+    ARCHIVE DESTINATION lib/native/xtree  # for import libraries on Windows
 )
 endif()
 
