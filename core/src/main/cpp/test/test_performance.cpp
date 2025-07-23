@@ -146,10 +146,11 @@ TEST_F(XTreePerformanceTest, BulkInsertions) {
     dimLabels->push_back("y");
     
     IndexDetails<DataRecord>* idx = new IndexDetails<DataRecord>(
-        2, 32, dimLabels, 1024*1024*100, nullptr, nullptr);
+        2, 32, dimLabels, nullptr, nullptr,
+        "test_bulk_insertions",
+        IndexDetails<DataRecord>::PersistenceMode::IN_MEMORY);
     
-    XTreeBucket<DataRecord>* root = new XTreeBucket<DataRecord>(
-        idx, true, nullptr, nullptr, 0, true, 0);
+    XTreeBucket<DataRecord>* root = new XTreeBucket<DataRecord>(idx, true, nullptr, nullptr, 0, true, 0);
     
     auto& cache = IndexDetails<DataRecord>::getCache();
     auto cachedRoot = cache.add(idx->getNextNodeID(), static_cast<IRecord*>(root));
@@ -185,6 +186,7 @@ TEST_F(XTreePerformanceTest, BulkInsertions) {
     
     delete idx;
     delete dimLabels;
+    
 }
 
 TEST_F(XTreePerformanceTest, SpatialQueries) {
@@ -197,10 +199,11 @@ TEST_F(XTreePerformanceTest, SpatialQueries) {
     dimLabels->push_back("y");
     
     IndexDetails<DataRecord>* idx = new IndexDetails<DataRecord>(
-        2, 32, dimLabels, 1024*1024*100, nullptr, nullptr);
+        2, 32, dimLabels, nullptr, nullptr,
+        "test_spatial_queries",
+        IndexDetails<DataRecord>::PersistenceMode::IN_MEMORY);
     
-    XTreeBucket<DataRecord>* root = new XTreeBucket<DataRecord>(
-        idx, true, nullptr, nullptr, 0, true, 0);
+    XTreeBucket<DataRecord>* root = new XTreeBucket<DataRecord>(idx, true, nullptr, nullptr, 0, true, 0);
     
     auto& cache = IndexDetails<DataRecord>::getCache();
     auto cachedRoot = cache.add(idx->getNextNodeID(), static_cast<IRecord*>(root));
@@ -240,11 +243,11 @@ TEST_F(XTreePerformanceTest, SpatialQueries) {
     }
     
     auto end = high_resolution_clock::now();
-    auto duration = duration_cast<milliseconds>(end - start);
+    auto duration = duration_cast<microseconds>(end - start);
     
-    cout << "Spatial queries: " << NUM_QUERIES 
-         << " queries in " << duration.count() << " milliseconds" 
-         << " (" << (NUM_QUERIES * 1000.0 / duration.count()) << " queries/second)" << endl;
+    cout << "Range queries: " << NUM_QUERIES 
+         << " queries in " << duration.count() << " microseconds" 
+         << " (" << (NUM_QUERIES * 1000000.0 / duration.count()) << " queries/second)" << endl;
     cout << "Average results per query: " << (totalResults / (double)NUM_QUERIES) << endl;
     
     EXPECT_GT(totalResults, 0);
@@ -260,4 +263,5 @@ TEST_F(XTreePerformanceTest, SpatialQueries) {
     
     delete idx;
     delete dimLabels;
+    
 }

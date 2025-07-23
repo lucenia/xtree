@@ -1,0 +1,11 @@
+{
+  "timestamp": "2024-01-15T10:30:00Z",
+  "metrics": {
+    "spatial_queries_per_sec": 333333.0,
+    "bulk_inserts_per_sec": 9603.0,
+    "mbr_expand_ops_per_ms": 454339.0,
+    "mbr_intersect_ops_per_ms": 449438.0,
+    "cow_snapshot_us": 177.0,
+    "page_write_tracking_ops_per_ms": 250000.0
+  }
+}

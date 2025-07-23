@@ -26,7 +26,7 @@
 
 #include <cstdint>
 #include <cstring>
-#include "float_utils.h"
+#include "util/float_utils.h"
 
 // Compiler hints for branch prediction
 #ifdef __GNUC__

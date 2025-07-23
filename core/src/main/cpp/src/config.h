@@ -25,7 +25,7 @@ namespace xtree {
 #endif
 
 #ifndef XTREE_M
-#define XTREE_M 231
+#define XTREE_M 50  // Reduced from 231 for better performance with random data
 #endif
 
 #ifndef XTREE_CHILDVEC_INIT_SIZE
@@ -33,7 +33,7 @@ namespace xtree {
 #endif
 
 #ifndef XTREE_MAX_OVERLAP
-#define XTREE_MAX_OVERLAP 0.20   // 20% maximum overlap
+#define XTREE_MAX_OVERLAP 0.10   // 10% maximum overlap - reduced for better performance
 #endif
 
 #ifndef XTREE_MAX_FANOUT
@@ -45,7 +45,7 @@ namespace xtree {
 #endif
 
 #ifndef XTREE_ITER_PAGE_SIZE
-#define XTREE_ITER_PAGE_SIZE 400
+#define XTREE_ITER_PAGE_SIZE 100  // Reduced from 400 for faster iterator creation
 #endif
 
 }

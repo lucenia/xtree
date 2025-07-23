@@ -20,13 +20,24 @@
 #pragma once
 
 #include "../pch.h"
+#include <cctype>
+#include <cstdlib>
+#include <algorithm>
+#include <type_traits>
+#include <atomic>
+#include <boost/filesystem/path.hpp>
 
 namespace xtree {
 
     class LogManager;
 
     enum LogLevel {
-        LOG_DEBUG, LOG_INFO, LOG_WARNING, LOG_ERROR, LOG_SEVERE
+        LOG_TRACE,    // Support engineering: detailed tracing
+        LOG_DEBUG,    // Developer: debug information  
+        LOG_INFO,     // Production: normal operation
+        LOG_WARNING,  // Production: warning conditions
+        LOG_ERROR,    // Production: error conditions
+        LOG_SEVERE    // Production: fatal errors
     };
 
     class Tee {
@@ -116,7 +127,7 @@ namespace xtree {
          * converts time_t to a string
          */
         inline string time_t_to_String(time_t t = time(0), bool local=false) {
-            char buf[25];
+            char buf[26];
 #if defined(_WIN32)
             ctime_s(buf, sizeof(buf), &t);
 #else
@@ -173,6 +184,16 @@ namespace xtree {
         Logger& operator<<(long long x)     { ss << x; return *this; }
         Logger& operator<<(unsigned long long x) { ss << x; return *this; }
         Logger& operator<<(bool x)               { ss << x; return *this; }
+        
+        // Support for boost::filesystem::path
+        template<typename PathType>
+        typename std::enable_if<
+            std::is_same<PathType, boost::filesystem::path>::value,
+            Logger&
+        >::type operator<<(const PathType& p) {
+            ss << p.string();
+            return *this;
+        }
 
         Logger& operator<<(Tee* tee) {
             ss << '\n';
@@ -218,11 +239,11 @@ namespace xtree {
         }
     };
 
-    extern int logLevel;
+    extern std::atomic<int> logLevel;
     extern int tlogLevel;
 
     inline ILogger& out( int level = 0 ) {
-        if ( level > logLevel )
+        if ( level < logLevel.load(std::memory_order_relaxed) )  // Fixed: lower value = more verbose
             return iLogger;
         return Logger::get();
     }
@@ -230,43 +251,95 @@ namespace xtree {
     /* flush the log stream if the log level is
        at the specified level or higher. */
     inline void logflush(int level = 0) {
-        if( level > logLevel )
+        if( level < logLevel.load(std::memory_order_relaxed) )  // Fixed: lower value = more verbose
             Logger::get().flush(0);
     }
 
     /* without prolog */
     inline ILogger& _log( int level = 0 ) {
-        if ( level > logLevel )
+        if ( level < logLevel.load(std::memory_order_relaxed) )  // Fixed: lower value = more verbose
             return iLogger;
         return Logger::get();
     }
 
     inline ILogger& log( int level ) {
-        if ( level > logLevel )
+        if ( level < logLevel.load(std::memory_order_relaxed) )  // Fixed: lower value = more verbose
             return iLogger;
         return Logger::get().prolog();
     }
 
-    inline ILogger& log( LogLevel l ) {
-        return Logger::get().prolog().setLogLevel( l );
+    // Auto-flushing wrapper for log messages
+    class LoggerWrapper {
+        Logger* logger_;
+        bool should_flush_;
+    public:
+        // Make constructor inline and trivial for optimization
+        __attribute__((always_inline))
+        LoggerWrapper(Logger* logger, bool should_flush) 
+            : logger_(logger), should_flush_(should_flush) {}
+        
+        ~LoggerWrapper() {
+            // Only do work if we have a logger (filtered messages have nullptr)
+            if (should_flush_ && logger_) {
+                logger_->flush(0);
+            }
+        }
+        
+        template<typename T>
+        __attribute__((always_inline))
+        LoggerWrapper& operator<<(const T& value) {
+            // Short-circuit for filtered messages
+            if (logger_) {
+                (*logger_) << value;
+            }
+            return *this;
+        }
+        
+        LoggerWrapper& operator<<(ostream& (*endl)(ostream&)) {
+            if (logger_) {
+                (*logger_) << endl;
+                should_flush_ = false; // endl already flushes
+            }
+            return *this;
+        }
+    };
+    
+    inline LoggerWrapper log( LogLevel l ) {
+        if ( l < logLevel.load(std::memory_order_relaxed) )  // LogLevel enum: lower value = more verbose
+            return LoggerWrapper(nullptr, false);   // Return no-op wrapper
+        Logger& logger = Logger::get().prolog().setLogLevel( l );
+        return LoggerWrapper(&logger, true);  // Auto-flush on destruction
     }
 
     inline ILogger& log() {
         return Logger::get().prolog();
     }
 
-    inline ILogger& error() {
-        return log( LOG_ERROR );
+    __attribute__((always_inline))
+    inline LoggerWrapper error() {
+        if (LOG_ERROR < logLevel.load(std::memory_order_relaxed))
+            return LoggerWrapper(nullptr, false);
+        return LoggerWrapper(&Logger::get().prolog().setLogLevel(LOG_ERROR), true);
     }
 
-    inline ILogger& warning() {
-        return log( LOG_WARNING );
+    __attribute__((always_inline))
+    inline LoggerWrapper warn() {
+        if (LOG_WARNING < logLevel.load(std::memory_order_relaxed))
+            return LoggerWrapper(nullptr, false);
+        return LoggerWrapper(&Logger::get().prolog().setLogLevel(LOG_WARNING), true);
+    }
+
+    __attribute__((always_inline))
+    inline LoggerWrapper warning() {
+        if (LOG_WARNING < logLevel.load(std::memory_order_relaxed))
+            return LoggerWrapper(nullptr, false);
+        return LoggerWrapper(&Logger::get().prolog().setLogLevel(LOG_WARNING), true);
     }
 
     extern const char * (*getcurns)();
 
     inline ILogger& problem( int level = 0 ) {
-        if ( level > logLevel )
+        if ( level < logLevel.load(std::memory_order_relaxed) )  // Fixed: lower value = more verbose
             return iLogger;
         Logger& l = Logger::get().prolog();
         l << ' ' << getcurns() << ' ';
@@ -295,5 +368,61 @@ namespace xtree {
             Logger::get().indentDec();
         }
     };
+
+    // Helper functions for specific log levels
+    // These return lightweight wrappers that compiler can optimize away
+    __attribute__((always_inline))
+    inline LoggerWrapper trace() {
+        if (LOG_TRACE < logLevel.load(std::memory_order_relaxed))
+            return LoggerWrapper(nullptr, false);
+        return LoggerWrapper(&Logger::get().prolog().setLogLevel(LOG_TRACE), true);
+    }
+    
+    __attribute__((always_inline))
+    inline LoggerWrapper debug() {
+        if (LOG_DEBUG < logLevel.load(std::memory_order_relaxed))
+            return LoggerWrapper(nullptr, false);
+        return LoggerWrapper(&Logger::get().prolog().setLogLevel(LOG_DEBUG), true);
+    }
+    
+    __attribute__((always_inline))
+    inline LoggerWrapper info() {
+        if (LOG_INFO < logLevel.load(std::memory_order_relaxed))
+            return LoggerWrapper(nullptr, false);
+        return LoggerWrapper(&Logger::get().prolog().setLogLevel(LOG_INFO), true);
+    }
+    
+    __attribute__((always_inline))
+    inline LoggerWrapper severe() {
+        if (LOG_SEVERE < logLevel.load(std::memory_order_relaxed))
+            return LoggerWrapper(nullptr, false);
+        return LoggerWrapper(&Logger::get().prolog().setLogLevel(LOG_SEVERE), true);
+    }
+
+    // Set log level from string (for configuration)
+    inline bool setLogLevelFromString(const std::string& level) {
+        std::string upper = level;
+        for (auto& c : upper) c = std::toupper(c);
+        
+        if (upper == "TRACE")   { logLevel.store(LOG_TRACE, std::memory_order_relaxed); return true; }
+        if (upper == "DEBUG")   { logLevel.store(LOG_DEBUG, std::memory_order_relaxed); return true; }
+        if (upper == "INFO")    { logLevel.store(LOG_INFO, std::memory_order_relaxed); return true; }
+        if (upper == "WARNING" || upper == "WARN") { logLevel.store(LOG_WARNING, std::memory_order_relaxed); return true; }
+        if (upper == "ERROR")   { logLevel.store(LOG_ERROR, std::memory_order_relaxed); return true; }
+        if (upper == "SEVERE" || upper == "FATAL") { logLevel.store(LOG_SEVERE, std::memory_order_relaxed); return true; }
+        
+        return false;
+    }
+    
+    // Initialize logging from environment variable
+    inline void initLoggingFromEnv() {
+        const char* env_level = std::getenv("LOG_LEVEL");
+        if (env_level) {
+            if (!setLogLevelFromString(env_level)) {
+                std::cerr << "Warning: Invalid LOG_LEVEL '" << env_level 
+                         << "'. Valid levels: TRACE, DEBUG, INFO, WARNING, ERROR, SEVERE\n";
+            }
+        }
+    }
 
 }

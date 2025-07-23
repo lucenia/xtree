@@ -40,12 +40,24 @@ public:
     MOCK_METHOD(KeyMBR*, getKey, (), (const, override));
     MOCK_METHOD(long, memoryUsage, (), (const, override));
     MOCK_METHOD(void, purge, (), (override));
+    
+    // Stub for persistence - MockRecord only used in IN_MEMORY tests
+    persist::NodeID getNodeID() const {
+        return persist::NodeID::invalid(); // Always invalid for mock
+    }
 };
 
 // Initialize static members of IndexDetails for MockRecord
 template<> JNIEnv* IndexDetails<MockRecord>::jvm = nullptr;
 template<> std::vector<IndexDetails<MockRecord>*> IndexDetails<MockRecord>::indexes = std::vector<IndexDetails<MockRecord>*>();
-template<> LRUCache<IRecord, UniqueId, LRUDeleteNone> IndexDetails<MockRecord>::cache(1024*1024*10); // 10MB cache
+
+// Provide a minimal implementation of initializeDurableStore for MockRecord
+// This is only used in tests and should never be called since we use IN_MEMORY mode
+template<>
+void IndexDetails<MockRecord>::initializeDurableStore(const std::string& data_dir) {
+    // Should never be called for test MockRecord which uses IN_MEMORY mode
+    throw std::runtime_error("MockRecord should only use IN_MEMORY mode");
+}
 
 class TestableXTreeBucket : public XTreeBucket<MockRecord> {
 public:
@@ -59,27 +71,23 @@ protected:
     void SetUp() override {
         // Setup a default IndexDetails and root
         std::vector<const char*> dummyFields = {};
-        index = new IndexDetails<MockRecord>(2, 4, &dummyFields, 1024L * 1024L, nullptr, nullptr);
+        index = new IndexDetails<MockRecord>(2, 4, &dummyFields, nullptr, nullptr, "test_xtree");
         root = new TestableXTreeBucket(index, true);
         
-        // For testing, we create a fake cache node that points to our root
-        // but isn't actually in the cache. This avoids memory leaks from the
-        // static cache persisting between tests.
-        cachedRoot = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
-            index->getNextNodeID(), static_cast<IRecord*>(root), nullptr);
+        // Use the real cache system instead of fake nodes
+        // This ensures splits work correctly in IN_MEMORY mode
+        auto& cache = index->getCache();
+        cachedRoot = cache.add(index->getNextNodeID(), static_cast<IRecord*>(root));
     }
 
     void TearDown() override {
-        // Delete the fake cache node (which doesn't delete root since we're managing it)
-        cachedRoot->object = nullptr; // Prevent the cache node from deleting root
-        delete cachedRoot;
-        // Now delete root manually
-        delete root;
-        delete index;
-        
-        // Clear the static cache to prevent memory leaks from splitRoot operations
+        // Clear the cache first (which will handle the nodes)
         // This is important because splitRoot adds new buckets to the real cache
         IndexDetails<MockRecord>::clearCache();
+        
+        // Don't manually delete root since it's managed by the cache
+        // Just delete the index
+        delete index;
     }
 
     IndexDetails<MockRecord>* index;
@@ -121,20 +129,21 @@ TEST_F(XTreeBucketTest, MockBucketInsertion) {
     EXPECT_CALL(*mock, memoryUsage())
         .WillRepeatedly(Return(100L));
     
-    // For testing with mocks, we need to create a fake cache node manually
-    // instead of using xt_insert which would add the mock to the real cache
-    auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
-        index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
-    
+    // Add the mock to the real cache for proper split handling
+    auto& cache = index->getCache();
+    auto* cachedMock = cache.add(index->getNextNodeID(), static_cast<IRecord*>(mock));
+    cache.pin(cachedMock, cachedMock->id);  // _insert requires pinned nodes
+
     // Use the internal _insert method directly
     root->_insert(cachedRoot, cachedMock);
+
+    cache.unpin(cachedMock, cachedMock->id);  // Release pin after insertion
     
     // Verify insertion
     EXPECT_EQ(root->n(), 1);
     
-    // Clean up: prevent the cache node from deleting the mock
-    cachedMock->object = nullptr;
-    delete cachedMock;
+    // Clean up: cache manages the nodes now
+    // Just clean up the mock objects themselves
     delete mockKey;
     delete mock;
 }
@@ -167,22 +176,22 @@ TEST_F(XTreeBucketTest, MockMultipleInsertions) {
         EXPECT_CALL(*mock, memoryUsage())
             .WillRepeatedly(Return(100L));
         
-        // Create fake cache node for testing
-        auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
-            index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
+        // Add to real cache for proper handling
+        auto& cache = index->getCache();
+        auto* cachedMock = cache.add(index->getNextNodeID(), static_cast<IRecord*>(mock));
+        cache.pin(cachedMock, cachedMock->id);  // _insert requires pinned nodes
         cachedMocks.push_back(cachedMock);
-        
+
         // Insert using _insert directly
         root->_insert(cachedRoot, cachedMock);
+
+        cache.unpin(cachedMock, cachedMock->id);  // Release pin after insertion
     }
-    
+
     EXPECT_EQ(root->n(), NUM_RECORDS);
-    
+
     // Clean up
-    for (auto* cachedMock : cachedMocks) {
-        cachedMock->object = nullptr;  // Prevent cache node from deleting mock
-        delete cachedMock;
-    }
+    // Cache manages the nodes - no need to delete them
     for (auto* mockKey : mockKeys) {
         delete mockKey;
     }
@@ -218,24 +227,24 @@ TEST_F(XTreeBucketTest, MockInsertionWithSplitScenario) {
         EXPECT_CALL(*mock, memoryUsage())
             .WillRepeatedly(Return(100L));
         
-        // Create fake cache node for testing
-        auto* cachedMock = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
-            index->getNextNodeID(), static_cast<IRecord*>(mock), nullptr);
+        // Add to real cache for proper handling
+        auto& cache = index->getCache();
+        auto* cachedMock = cache.add(index->getNextNodeID(), static_cast<IRecord*>(mock));
+        cache.pin(cachedMock, cachedMock->id);  // _insert requires pinned nodes
         cachedMocks.push_back(cachedMock);
-        
+
         // Insert using _insert directly
         root->_insert(cachedRoot, cachedMock);
+
+        cache.unpin(cachedMock, cachedMock->id);  // Release pin after insertion
     }
-    
+
     // After many insertions, the tree structure should have grown
     EXPECT_GE(root->n(), 1);  // Root should have at least one child
     EXPECT_GT(root->memoryUsage(), sizeof(XTreeBucket<MockRecord>));
     
     // Clean up
-    for (auto* cachedMock : cachedMocks) {
-        cachedMock->object = nullptr;  // Prevent cache node from deleting mock
-        delete cachedMock;
-    }
+    // Cache manages the nodes - no need to delete them
     for (auto* mockKey : mockKeys) {
         delete mockKey;
     }

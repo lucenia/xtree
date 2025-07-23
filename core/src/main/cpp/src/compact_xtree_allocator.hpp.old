@@ -1,0 +1,195 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * Compact allocator wrapper for XTree that maintains the same interface
+ * as COWXTreeAllocator but uses CompactAllocator internally
+ */
+
+#pragma once
+
+#include "memmgr/compact_snapshot_manager.hpp"
+#include "cow_xtree_allocator.hpp"
+#include <memory>
+
+namespace xtree {
+
+// Forward declarations
+template<typename Record> class DirectMemoryCOWManager;
+template<typename Record> class XTreeBucket;
+// template<typename Record> class XTreePODConverter; // Removed - use XTreePOD instead  
+template<typename Record> class XTreeLazyLoader;
+
+/**
+ * XTree allocator that uses CompactAllocator for ultra-fast snapshot/reload
+ * Implements the same interface as COWXTreeAllocator for compatibility
+ */
+template<typename Record>
+class CompactXTreeAllocator {
+protected:
+    CompactSnapshotManager* snapshot_manager_;
+    CompactAllocator* compact_allocator_;
+    std::atomic<size_t> operations_count_{0};
+    XTreeBucket<Record>* tracked_root_{nullptr};
+    
+public:
+    explicit CompactXTreeAllocator(CompactSnapshotManager* manager)
+        : snapshot_manager_(manager),
+          compact_allocator_(manager->get_allocator()) {
+    }
+    
+    ~CompactXTreeAllocator() = default;
+    
+    /**
+     * Allocate a new XTreeBucket with compact allocator
+     */
+    template<typename... Args>
+    XTreeBucket<Record>* allocate_bucket(Args&&... args) {
+        // Allocate memory through compact allocator
+        auto offset = compact_allocator_->allocate(sizeof(XTreeBucket<Record>));
+        if (offset == CompactAllocator::INVALID_OFFSET) {
+            return nullptr;
+        }
+        
+        void* mem = compact_allocator_->get_ptr(offset);
+        
+        // Use placement new to construct
+        return new (mem) XTreeBucket<Record>(std::forward<Args>(args)...);
+    }
+    
+    /**
+     * Allocate a new DataRecord with compact allocator
+     */
+    template<typename... Args>
+    Record* allocate_record(Args&&... args) {
+        // Calculate size for the record
+        // For DataRecord, we need to handle variable size based on dimensions
+        size_t size = sizeof(Record);
+        
+        // If this is a DataRecord with dimensions, calculate proper size
+        if constexpr (std::is_same_v<Record, DataRecord>) {
+            // Extract dimension from args if possible
+            // For now, use a reasonable default
+            size = 1024; // This should be calculated based on actual dimensions
+        }
+        
+        // Allocate memory through compact allocator
+        auto offset = compact_allocator_->allocate(size);
+        if (offset == CompactAllocator::INVALID_OFFSET) {
+            return nullptr;
+        }
+        
+        void* mem = compact_allocator_->get_ptr(offset);
+        
+        // Use placement new to construct
+        return new (mem) Record(std::forward<Args>(args)...);
+    }
+    
+    /**
+     * Deallocate a compact-managed object
+     * Note: Compact allocator doesn't support individual deallocation
+     */
+    template<typename T>
+    void deallocate(T* ptr) {
+        if (ptr) {
+            ptr->~T();  // Call destructor
+            // Compact allocator doesn't support individual deallocation
+            // Memory is reclaimed when the entire arena is freed
+        }
+    }
+    
+    /**
+     * Record a write operation to a bucket
+     */
+    void record_bucket_write(XTreeBucket<Record>* bucket) {
+        // Track operations for potential auto-snapshot
+        record_operation();
+    }
+    
+    /**
+     * Record any tree operation
+     */
+    void record_operation() {
+        operations_count_.fetch_add(1, std::memory_order_relaxed);
+        
+        // Auto-snapshot after threshold (e.g., 10000 operations)
+        if (operations_count_.load() >= 10000) {
+            std::cout << "[DEBUG] Auto-snapshot triggered at " << operations_count_.load() << " operations\n";
+            auto* allocator = snapshot_manager_->get_allocator();
+            std::cout << "[DEBUG] Segments: " << allocator->get_segment_count() 
+                      << ", Used size: " << allocator->get_used_size() << " bytes\n";
+            
+            // Save snapshot (now supports multi-segment!)
+            try {
+                snapshot_manager_->save_snapshot();
+                operations_count_ = 0;
+                std::cout << "[DEBUG] Auto-snapshot saved successfully\n";
+            } catch (const std::exception& e) {
+                std::cerr << "[ERROR] Auto-snapshot failed: " << e.what() << "\n";
+                operations_count_ = 0;  // Reset to avoid spamming
+            }
+        }
+    }
+    
+    /**
+     * Get the COW manager (returns nullptr for compact allocator)
+     */
+    DirectMemoryCOWManager<Record>* get_cow_manager() {
+        return nullptr; // No COW manager in compact mode
+    }
+    
+    /**
+     * Get the snapshot manager
+     */
+    CompactSnapshotManager* get_snapshot_manager() {
+        return snapshot_manager_;
+    }
+    
+    /**
+     * Helper to convert pointer to offset (for persistence)
+     */
+    CompactAllocator::offset_t to_offset(const void* ptr) const {
+        return compact_allocator_->get_offset(ptr);
+    }
+    
+    /**
+     * Helper to convert offset to pointer (for loading)
+     */
+    template<typename T>
+    T* from_offset(CompactAllocator::offset_t offset) const {
+        return compact_allocator_->get_ptr<T>(offset);
+    }
+    
+    /**
+     * Trigger manual snapshot - implementation in compact_xtree_allocator_impl.hpp
+     */
+    inline void save_snapshot();
+    
+    /**
+     * Set the root bucket for persistence
+     */
+    virtual void set_root_bucket(XTreeBucket<Record>* root) {
+        tracked_root_ = root;
+        if (root) {
+            // For now, store the offset of the regular bucket
+            // Will be converted to POD during save_snapshot
+            auto offset = compact_allocator_->get_offset(root);
+            std::cout << "[set_root_bucket] Tracking root bucket " << root << " at offset " << offset << "\n";
+        }
+    }
+    
+    /**
+     * Convert and save the tree in POD format
+     * NOTE: This method is deprecated - use the new POD implementation in xtree_pod.hpp
+     */
+    void save_pod_snapshot(XTreeBucket<Record>* root) {
+        // XTreePODConverter removed - use new POD implementation instead
+        throw std::runtime_error("save_pod_snapshot is deprecated - use XTreePOD from xtree_pod.hpp");
+    }
+    
+    /**
+     * Get the root bucket after reload - implementation in compact_xtree_allocator_impl.hpp
+     */
+    virtual inline XTreeBucket<Record>* get_root_bucket(IndexDetails<Record>* index);
+};
+
+} // namespace xtree

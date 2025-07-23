@@ -17,6 +17,8 @@
  * https://www.gnu.org/licenses/agpl-3.0.html
  */
 
+import java.time.Duration
+
 def nativeBuildDir = "${rootProject.projectDir}/build/native"
 
 // Helper function to detect system page size
@@ -100,16 +102,37 @@ task configureNative(type: Exec) {
     }
 
     workingDir nativeBuildDir
+    // Allow debug builds with -Pdebug or -PbuildType=Debug
+    def buildType = "Release"
+    if (project.hasProperty('debug')) {
+        buildType = "Debug"
+    } else if (project.hasProperty('buildType')) {
+        buildType = project.property('buildType')
+    }
+
     def cmakeArgs = [
         'cmake',
         "${project.projectDir}",
-        "-DCMAKE_BUILD_TYPE=Release"
+        "-DCMAKE_BUILD_TYPE=${buildType}"
     ]
+
+    println "Configuring native build with CMAKE_BUILD_TYPE=${buildType}"
     
     // Add detected page size if available
     def detectedPageSize = detectSystemPageSize()
     if (detectedPageSize > 0) {
         cmakeArgs += "-DXTREE_PAGE_SIZE=${detectedPageSize}"
+    }
+
+    // Add sanitizer flags
+    if (project.hasProperty("asan")) {
+        cmakeArgs += "-DENABLE_ASAN=ON"
+    }
+    if (project.hasProperty("ubsan")) {
+        cmakeArgs += "-DENABLE_UBSAN=ON"
+    }
+    if (project.hasProperty("tsan")) {
+        cmakeArgs += "-DENABLE_TSAN=ON"
     }
 
     // Add CMAKE_TOOLCHAIN_FILE if specified (for Windows vcpkg support)
@@ -183,12 +206,22 @@ task configureNativeSnapshot(type: Exec) {
     }
     
     workingDir nativeBuildDir
+    // Allow debug builds with -Pdebug or -PbuildType=Debug
+    def buildType = "Release"
+    if (project.hasProperty('debug')) {
+        buildType = "Debug"
+    } else if (project.hasProperty('buildType')) {
+        buildType = project.property('buildType')
+    }
+
     def cmakeArgs = [
-        'cmake', 
-        project.projectDir, 
-        "-DCMAKE_BUILD_TYPE=Release", 
+        'cmake',
+        project.projectDir,
+        "-DCMAKE_BUILD_TYPE=${buildType}",
         "-DVERSION_SUFFIX_OVERRIDE=-SNAPSHOT"
     ]
+
+    println "Configuring native SNAPSHOT build with CMAKE_BUILD_TYPE=${buildType}"
     
     // Add detected page size if available
     def detectedPageSize = detectSystemPageSize()
@@ -258,10 +291,44 @@ task testNative {
         def currentSuite = ""
         def testsFailed = false
         
-        def proc = new ProcessBuilder(testExecutable)
+        // Set up environment with Boost DLL path for Windows
+        def procBuilder = new ProcessBuilder(testExecutable)
             .directory(file(nativeBuildDir))
             .redirectErrorStream(true)
-            .start()
+            
+        if (System.getProperty("os.name").toLowerCase().contains("windows")) {
+            def env = procBuilder.environment()
+            def currentPath = env.get("PATH") ?: ""
+            
+            // Add common Boost DLL locations to PATH
+            def boostPaths = [
+                "C:\\local\\boost_1_88_0\\stage\\lib",
+                "C:\\boost\\stage\\lib",
+                "C:\\boost_1_88_0\\stage\\lib"
+            ]
+            
+            // Check BOOST_ROOT environment variable
+            def boostRoot = env.get("BOOST_ROOT")
+            if (boostRoot) {
+                boostPaths.add(0, "${boostRoot}\\stage\\lib".toString())
+            }
+            
+            // Add existing Boost paths that actually exist
+            def existingBoostPaths = boostPaths.findAll { path ->
+                file(path).exists()
+            }
+            
+            if (existingBoostPaths) {
+                def newPath = existingBoostPaths.join(";") + ";" + currentPath
+                env.put("PATH", newPath)
+                println "Added Boost DLL paths to runtime PATH: ${existingBoostPaths.join(', ')}"
+            } else {
+                println "Warning: No Boost DLL directories found in standard locations"
+                println "Searched: ${boostPaths.join(', ')}"
+            }
+        }
+        
+        def proc = procBuilder.start()
         
         // Simply run the tests and capture all output
         def output = new StringBuilder()
@@ -313,10 +380,58 @@ task testNative {
         println "=" * 60
         
         if (exitCode != 0 || testsFailed) {
-            throw new GradleException("Tests failed: ${failedCount} failed, ${passedCount} passed out of ${testCount} total")
+            throw new GradleException("Tests failed: ${failedCount} failed, ${passedCount} passed")
         }
         
+        // testCount may be incorrect due to disabled tests, so just report passed count
         println "✓ All ${passedCount} tests passed successfully!"
+    }
+}
+
+// Add benchmarks task
+task benchmarksNative(type: Exec) {
+    dependsOn buildNative
+    
+    description = 'Run native C++ benchmarks'
+    
+    def benchmarksExe = file("${nativeBuildDir}/bin/xtree_benchmarks")
+    
+    doFirst {
+        if (!benchmarksExe.exists()) {
+            throw new GradleException("Benchmarks executable not found at ${benchmarksExe}")
+        }
+        
+        println "=" * 60
+        println "Running XTree native benchmarks..."
+        println "=" * 60
+        println "Note: Benchmarks may take up to 30 minutes to complete"
+        println "=" * 60
+    }
+    
+    // Allow passing arguments to benchmarks with -PbenchmarkArgs="..."
+    def benchmarkArgs = project.hasProperty('benchmarkArgs') ? 
+        project.property('benchmarkArgs').split(' ') : []
+    
+    commandLine([benchmarksExe.absolutePath] + benchmarkArgs)
+    workingDir nativeBuildDir
+    
+    // Increase timeout for benchmarks (30 minutes)
+    // Can be overridden with -Pbenchmark.timeout=60 (in minutes)
+    def timeoutMinutes = project.hasProperty('benchmark.timeout') ? 
+        project.property('benchmark.timeout') as int : 30
+    timeout = Duration.ofMinutes(timeoutMinutes)
+    
+    // Ignore exit code 13 (SIGPIPE) which can happen when output pipe is closed
+    ignoreExitValue = true
+    
+    doLast {
+        // Check if benchmarks actually failed (non-zero exit code other than 13)
+        def result = executionResult.get()
+        if (result.exitValue != 0 && result.exitValue != 13) {
+            throw new GradleException("Benchmarks failed with exit code: ${result.exitValue}")
+        }
+        println "=" * 60
+        println "✓ Benchmarks completed successfully!"
     }
 }
 
@@ -328,6 +443,11 @@ afterEvaluate {
     // Configure test task to run tests
     task test {
         dependsOn testNative
+    }
+    
+    // Configure benchmarks task
+    task benchmarks {
+        dependsOn benchmarksNative
     }
 }
 
