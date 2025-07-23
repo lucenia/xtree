@@ -36,22 +36,22 @@ using namespace std::chrono;
 
 class PageWriteTrackerTest : public ::testing::Test {
 protected:
-    static const size_t TEST_PAGE_SIZE;
+    size_t GetTestPageSize() const {
+        return PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+    }
     
     void SetUp() override {
-        tracker = make_unique<PageWriteTracker>(PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE);
+        tracker = make_unique<PageWriteTracker>(GetTestPageSize());
     }
     
     unique_ptr<PageWriteTracker> tracker;
 };
 
-const size_t PageWriteTrackerTest::TEST_PAGE_SIZE = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
-
 // Test basic write tracking
 TEST_F(PageWriteTrackerTest, BasicWriteTracking) {
     // Use page-aligned addresses based on actual page size
-    void* page1 = reinterpret_cast<void*>(TEST_PAGE_SIZE);
-    void* page2 = reinterpret_cast<void*>(TEST_PAGE_SIZE * 2);
+    void* page1 = reinterpret_cast<void*>(GetTestPageSize());
+    void* page2 = reinterpret_cast<void*>(GetTestPageSize() * 2);
     
     // Test addresses are now correctly set
     
@@ -80,7 +80,7 @@ TEST_F(PageWriteTrackerTest, BasicWriteTracking) {
 TEST_F(PageWriteTrackerTest, HotPageDetection) {
     vector<void*> pages;
     for (int i = 0; i < 10; i++) {
-        pages.push_back(reinterpret_cast<void*>(TEST_PAGE_SIZE * (i + 1)));
+        pages.push_back(reinterpret_cast<void*>(GetTestPageSize() * (i + 1)));
     }
     
     
@@ -122,9 +122,9 @@ TEST_F(PageWriteTrackerTest, AccessTracking) {
 TEST_F(PageWriteTrackerTest, PageAlignment) {
     // All these addresses should map to the same page
     // Use addresses within the first page
-    void* addr1 = reinterpret_cast<void*>(TEST_PAGE_SIZE);
-    void* addr2 = reinterpret_cast<void*>(TEST_PAGE_SIZE + 0x100);
-    void* addr3 = reinterpret_cast<void*>(TEST_PAGE_SIZE + TEST_PAGE_SIZE - 1);
+    void* addr1 = reinterpret_cast<void*>(GetTestPageSize());
+    void* addr2 = reinterpret_cast<void*>(GetTestPageSize() + 0x100);
+    void* addr3 = reinterpret_cast<void*>(GetTestPageSize() + GetTestPageSize() - 1);
     
     tracker->record_write(addr1);
     tracker->record_write(addr2);

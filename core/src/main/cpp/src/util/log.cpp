@@ -24,7 +24,7 @@ namespace xtree {
 
     ILogger iLogger;
     boost::mutex Logger::sm;
-    FILE* Logger::logfile;
+    FILE* Logger::logfile = nullptr;
     boost::thread_specific_ptr<Logger> Logger::tsp;
 
     const char* logLevelToString( LogLevel l ) {

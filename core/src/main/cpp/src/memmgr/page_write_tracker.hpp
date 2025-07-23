@@ -231,6 +231,7 @@ private:
     
     const size_t page_size_;
     const uint32_t hot_write_threshold_;
+    const size_t page_shift_bits_;  // Cached bit shift value for page size
     
     // Batched timestamp updates
     std::atomic<uint64_t> current_epoch_{0};
@@ -252,59 +253,45 @@ private:
     size_t hash_page(void* page) const {
         // Fast hash function for aligned addresses
         uintptr_t addr = reinterpret_cast<uintptr_t>(page);
-        // Use page_size_ bits instead of hardcoded 12 for Windows compatibility
-        size_t page_bits = 0;
-        size_t temp_size = page_size_;
-        while (temp_size > 1) {
-            temp_size >>= 1;
-            page_bits++;
-        }
-        addr >>= page_bits; // Remove page offset bits based on actual page size
+        addr >>= page_shift_bits_; // Remove page offset bits using cached value
         return (addr * 2654435761ULL) & (HASH_TABLE_SIZE - 1);
     }
     
     PageStats* find_or_create_stats(void* page) {
         size_t bucket = hash_page(page);
         
-        // Try to find existing entry first - multiple passes to handle Windows threading issues
-        for (int retry = 0; retry < 3; retry++) {
-            HashEntry* current = hash_table_[bucket].load(std::memory_order_acquire);
-            while (current) {
-                void* entry_page = current->page.load(std::memory_order_acquire);
-                if (entry_page == page) {
-                    return &current->stats;
-                }
-                current = current->next.load(std::memory_order_acquire);
-            }
-            
-            // Small delay on Windows to handle potential timing issues
-            if (retry < 2) {
-                std::this_thread::yield();
-            }
-        }
-        
-        // Now try to create new entry
+        // Try to find existing entry first
         HashEntry* current = hash_table_[bucket].load(std::memory_order_acquire);
-        HashEntry* prev = nullptr;
-        
         while (current) {
             void* entry_page = current->page.load(std::memory_order_acquire);
             if (entry_page == page) {
                 return &current->stats;
             }
+            current = current->next.load(std::memory_order_acquire);
+        }
+        
+        // Now try to create new entry
+        HashEntry* new_current = hash_table_[bucket].load(std::memory_order_acquire);
+        HashEntry* prev = nullptr;
+        
+        while (new_current) {
+            void* entry_page = new_current->page.load(std::memory_order_acquire);
+            if (entry_page == page) {
+                return &new_current->stats;
+            }
             if (entry_page == nullptr) {
                 // Try to claim this entry
                 void* expected = nullptr;
-                if (current->page.compare_exchange_strong(expected, page,
+                if (new_current->page.compare_exchange_strong(expected, page,
                                                          std::memory_order_acq_rel,
                                                          std::memory_order_acquire)) {
                     // Reset stats for reused entry
-                    current->stats = PageStats{};
-                    return &current->stats;
+                    new_current->stats = PageStats{};
+                    return &new_current->stats;
                 }
             }
-            prev = current;
-            current = current->next.load(std::memory_order_acquire);
+            prev = new_current;
+            new_current = new_current->next.load(std::memory_order_acquire);
         }
         
         // Need to allocate new entry
@@ -351,6 +338,16 @@ private:
         return &new_entry->stats;
     }
     
+    static size_t calculate_page_shift(size_t page_size) {
+        size_t bits = 0;
+        size_t temp = page_size;
+        while (temp > 1) {
+            temp >>= 1;
+            bits++;
+        }
+        return bits;
+    }
+    
     void start_epoch_timer() {
         bool expected = false;
         if (!timer_running_.compare_exchange_strong(expected, true,
@@ -368,7 +365,9 @@ private:
     
 public:
     explicit PageWriteTracker(size_t page_size = 4096, uint32_t hot_threshold = 10) 
-        : page_size_(page_size), hot_write_threshold_(hot_threshold) {
+        : page_size_(page_size), 
+          hot_write_threshold_(hot_threshold),
+          page_shift_bits_(calculate_page_shift(page_size)) {
         // Initialize hash table
         for (auto& bucket : hash_table_) {
             bucket.store(nullptr, std::memory_order_relaxed);
