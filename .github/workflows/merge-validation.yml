@@ -74,21 +74,22 @@ jobs:
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
       
-      - name: Install Boost (Windows)
-        if: matrix.os == 'windows-latest'
-        uses: MarkusJx/install-boost@v2.4.5
-        id: install-boost
-        with:
-          boost_version: 1.83.0
-          toolset: msvc
-          platform_version: 2022
-          boost_install_dir: C:\boost
-      
-      - name: Configure environment (Windows)
+      - name: Setup vcpkg (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          # Set Boost environment variables
-          echo "BOOST_ROOT=${{ steps.install-boost.outputs.BOOST_ROOT }}" >> $GITHUB_ENV
+          git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+          C:\vcpkg\bootstrap-vcpkg.bat
+          echo "VCPKG_ROOT=C:\vcpkg" >> $GITHUB_ENV
+          echo "C:\vcpkg" >> $GITHUB_PATH
+        shell: cmd
+          
+      - name: Install Boost libraries (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          vcpkg install boost-system:x64-windows boost-filesystem:x64-windows boost-thread:x64-windows boost-iostreams:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
+          echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $GITHUB_ENV
+        shell: cmd
       
       - name: Verify Gradle wrapper
         run: ./gradlew verifyWrapper --no-daemon
