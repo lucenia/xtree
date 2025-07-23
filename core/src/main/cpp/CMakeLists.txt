@@ -259,10 +259,18 @@ endif()
 if(WIN32 AND EXISTS "C:/vcpkg/installed")
     # Try to detect the vcpkg triplet
     if(NOT VCPKG_TARGET_TRIPLET)
-        if(EXISTS "C:/vcpkg/installed/x64-mingw-static")
-            set(VCPKG_TARGET_TRIPLET "x64-mingw-static")
-        elseif(EXISTS "C:/vcpkg/installed/x64-windows")
-            set(VCPKG_TARGET_TRIPLET "x64-windows")
+        # Check for MinGW compiler
+        if(MINGW)
+            if(EXISTS "C:/vcpkg/installed/x64-mingw-dynamic")
+                set(VCPKG_TARGET_TRIPLET "x64-mingw-dynamic")
+            elseif(EXISTS "C:/vcpkg/installed/x64-mingw-static")
+                set(VCPKG_TARGET_TRIPLET "x64-mingw-static")
+            endif()
+        else()
+            # MSVC compiler
+            if(EXISTS "C:/vcpkg/installed/x64-windows")
+                set(VCPKG_TARGET_TRIPLET "x64-windows")
+            endif()
         endif()
     endif()
     
@@ -274,7 +282,36 @@ if(WIN32 AND EXISTS "C:/vcpkg/installed")
     endif()
 endif()
 
-find_package(Boost 1.58 REQUIRED COMPONENTS system filesystem thread iostreams)
+# Try to find Boost with vcpkg first
+find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
+
+# If not found and on Windows, try alternative approaches
+if(NOT Boost_FOUND AND WIN32)
+    message(STATUS "Boost not found via vcpkg, trying alternative paths...")
+    
+    # Try common Windows Boost locations
+    set(BOOST_SEARCH_PATHS
+        "C:/local/boost_1_88_0"
+        "C:/boost"
+        "C:/boost_1_88_0"
+        "$ENV{BOOST_ROOT}"
+        "$ENV{ProgramFiles}/boost"
+    )
+    
+    foreach(search_path ${BOOST_SEARCH_PATHS})
+        if(EXISTS "${search_path}" AND NOT Boost_FOUND)
+            message(STATUS "Trying Boost at: ${search_path}")
+            set(BOOST_ROOT "${search_path}")
+            set(Boost_NO_SYSTEM_PATHS ON)
+            find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
+        endif()
+    endforeach()
+endif()
+
+# Final check - if still not found, it's required
+if(NOT Boost_FOUND)
+    message(FATAL_ERROR "Boost not found. Please install Boost or set BOOST_ROOT.")
+endif()
 
 if(Boost_FOUND)
     message(STATUS "Boost version: ${Boost_VERSION}")

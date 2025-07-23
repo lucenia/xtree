@@ -32,7 +32,7 @@ jobs:
             runs-on: windows-latest
             platform: Windows
             arch: x86_64
-            cmake-generator: "MinGW Makefiles"
+            cmake-generator: "Visual Studio 17 2022"
           # ARM builds
           - os: ubuntu-latest
             runs-on: ubuntu-24.04-arm
@@ -71,18 +71,23 @@ jobs:
           brew update
           brew install cmake boost
       
+      - name: Setup MSVC (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+      
       - name: Install dependencies (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
-          choco install mingw
           
-          git clone https://github.com/Microsoft/vcpkg.git C:/vcpkg
-          C:/vcpkg/bootstrap-vcpkg.bat
-          C:/vcpkg/vcpkg.exe install boost-system boost-filesystem boost-thread boost-iostreams --triplet x64-mingw-static
+          # Boost comes pre-installed on GitHub runners for MSVC
+          echo "Using pre-installed Boost libraries for MSVC"
           
-          echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
-          echo "VCPKG_TARGET_TRIPLET=x64-mingw-static" >> $GITHUB_ENV
+          # Set up for MSVC build with vcpkg (if needed)
+          if (Test-Path "C:/vcpkg") {
+            echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
+            echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $GITHUB_ENV
+          }
       
       - name: Get version from tag
         id: get_version

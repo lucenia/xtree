@@ -36,7 +36,7 @@ jobs:
             cmake-generator: "Unix Makefiles"
           - os: windows-latest
             runs-on: windows-latest
-            cmake-generator: "MinGW Makefiles"
+            cmake-generator: "Visual Studio 17 2022"
           # Additional ARM builds
           - os: ubuntu-latest
             arch: arm64
@@ -71,23 +71,25 @@ jobs:
           brew update
           brew install cmake boost
       
+      - name: Setup MSVC (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+      
       - name: Install dependencies (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          # Install dependencies with Chocolatey
+          # Install CMake with Chocolatey
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System'
-          choco install mingw
           
-          # Install vcpkg for better Boost support on Windows
-          git clone https://github.com/Microsoft/vcpkg.git C:/vcpkg
-          C:/vcpkg/bootstrap-vcpkg.bat
-          C:/vcpkg/vcpkg.exe integrate install
-          C:/vcpkg/vcpkg.exe install boost-system boost-filesystem boost-thread boost-iostreams --triplet x64-mingw-static
+          # Boost comes pre-installed on GitHub runners for MSVC
+          # Just verify vcpkg is available (pre-installed on GitHub runners)
+          echo "Using pre-installed Boost libraries for MSVC"
           
-          # Set environment variables for CMake to find Boost
-          echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
-          echo "VCPKG_TARGET_TRIPLET=x64-mingw-static" >> $GITHUB_ENV
-          echo "CMAKE_PREFIX_PATH=C:/vcpkg/installed/x64-mingw-static" >> $GITHUB_ENV
+          # Set up for MSVC build with vcpkg (if needed)
+          if (Test-Path "C:/vcpkg") {
+            echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
+            echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $GITHUB_ENV
+          }
       
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
