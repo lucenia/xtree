@@ -306,8 +306,12 @@ TEST_F(COWPrefaultPerformanceTest, BatchUpdateBenefit) {
     // Both should be similar since they're on the same page, but batch concept is demonstrated
     // Very relaxed constraint for CI environments - just ensure neither takes unreasonably long
     // The real benefit of batching is reducing COW faults, not necessarily faster individual page writes
-    EXPECT_LT(individual_time.count(), 10000); // Individual updates should complete within 10ms
-    EXPECT_LT(batch_time.count(), 10000);      // Batch updates should complete within 10ms
+    // ARM processors and CI environments may have different performance characteristics
+    const long MAX_TIME_MICROS = 50000; // 50ms - more tolerant for ARM and CI
+    EXPECT_LT(individual_time.count(), MAX_TIME_MICROS) 
+        << "Individual updates took too long: " << individual_time.count() << " microseconds";
+    EXPECT_LT(batch_time.count(), MAX_TIME_MICROS) 
+        << "Batch updates took too long: " << batch_time.count() << " microseconds";
     
     // Optional: Only check relative performance if both timings are meaningful (> 1 microsecond)
     if (individual_time.count() > 1 && batch_time.count() > 1) {

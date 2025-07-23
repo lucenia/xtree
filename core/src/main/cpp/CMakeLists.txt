@@ -304,11 +304,6 @@ if(WIN32)
 endif()
 
 # Try to find Boost with vcpkg first
-# Use legacy FindBoost module for better compatibility
-cmake_policy(SET CMP0167 OLD)
-set(Boost_USE_STATIC_LIBS OFF)
-set(Boost_USE_MULTITHREADED ON) 
-set(Boost_USE_STATIC_RUNTIME OFF)
 find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
 
 # If not found and on Windows, try alternative approaches
