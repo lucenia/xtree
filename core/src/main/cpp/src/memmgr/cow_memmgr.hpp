@@ -793,8 +793,8 @@ private:
         // Atomic rename
 #ifdef _WIN32
         // Windows rename fails if target exists, so delete it first
-        _unlink(persist_file_.c_str());
-        if (_rename(temp_file.c_str(), persist_file_.c_str()) != 0) {
+        std::remove(persist_file_.c_str());
+        if (std::rename(temp_file.c_str(), persist_file_.c_str()) != 0) {
             throw std::runtime_error("Failed to commit memory snapshot");
         }
 #else

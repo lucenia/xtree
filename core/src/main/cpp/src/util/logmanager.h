@@ -27,7 +27,12 @@
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>
+#include <cstdio>  // for rename
+#include <cstdlib> // for getenv
 #endif
+
+#include <cstdio>   // for rename on all platforms
+#include <cstdlib>  // for getenv on all platforms
 
 #//define BOOST_NO_CXX11_SCOPED_ENUMS
 #include <boost/filesystem.hpp>
@@ -143,8 +148,8 @@ namespace xtree {
                 cout << "renaming" << endl;
 #ifdef _WIN32
                 // On Windows, rename fails if target exists
-                _unlink(s.c_str());  // Delete target if it exists
-                _rename(_path.c_str(), s.c_str());
+                std::remove(s.c_str());  // Delete target if it exists
+                std::rename(_path.c_str(), s.c_str());
 #else
                 rename(_path.c_str(), s.c_str());
 #endif
