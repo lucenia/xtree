@@ -64,7 +64,7 @@ Benchmark results on commodity hardware (Intel i7, 32GB RAM, SSD):
 | **Index Build Time** (10M points) | 0.96 seconds | 48 seconds | **50x faster** |
 | **Range Query** (median latency) | 2 μs | 5,000 μs | **2,500x faster** |
 | **Range Query** (95th percentile) | 3 μs | 20,000 μs | **6,667x faster** |
-| **Point Query** throughput | 500,000 qps | 30,000 qps | **16.7x higher** |
+| **Point Query** throughput | 500,000 qps | 756 qps | **661x higher** |
 | **Range Query** throughput | 467,000 qps | 180 qps | **2,594x higher** |
 | **Memory Usage** (per point) | 24 bytes | 40 bytes | **1.7x smaller** |
 | **COW Snapshot Time** | 100 μs | N/A | **Near-instant** |
