@@ -276,7 +276,13 @@ namespace xtree {
     inline string errnoWithDescription(int x = errno) {
         stringstream s;
         s << "errno:" << x << ' ';
+#ifdef _WIN32
+        char buffer[256];
+        strerror_s(buffer, sizeof(buffer), x);
+        s << buffer;
+#else
         s << strerror(x);
+#endif
 
         return s.str();
     }

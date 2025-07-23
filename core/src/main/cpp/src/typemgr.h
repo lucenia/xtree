@@ -35,7 +35,7 @@ namespace xtree {
 
     template<>
     struct xtTypeTraits<string> {
-        static long unsigned int length(string value) { return value.length(); }
+        static long unsigned int length(string value) { return static_cast<long unsigned int>(value.length()); }
         static void setValue(string rhs, string &lhs) { lhs = rhs;  }
         /*static int compare(string v1, string v2) {
 

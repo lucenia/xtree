@@ -20,8 +20,10 @@
 #pragma once
 
 #include "log.h"
+#ifndef _WIN32
 #include <cxxabi.h>
 #include <sys/file.h>
+#endif
 
 #//define BOOST_NO_CXX11_SCOPED_ENUMS
 #include <boost/filesystem.hpp>
