@@ -84,10 +84,29 @@ namespace xtree {
     }
 #endif
 
-    /* Returns the amount of milliseconds elapsed since the UNIX epoch. Works on both
+    /* Returns the amount of microseconds elapsed since the UNIX epoch. Works on both
      * windows and linux. */
     unsigned long GetTimeMicro64() {
-        /* Linux */
+#ifdef _WIN32
+        /* Windows */
+        FILETIME ft;
+        LARGE_INTEGER li;
+
+        /* Get the current time as a FILETIME */
+        GetSystemTimeAsFileTime(&ft);
+
+        /* Convert FILETIME to LARGE_INTEGER for easier manipulation */
+        li.LowPart = ft.dwLowDateTime;
+        li.HighPart = ft.dwHighDateTime;
+
+        /* FILETIME is in 100-nanosecond intervals since January 1, 1601 */
+        /* Convert to microseconds since Unix epoch (January 1, 1970) */
+        const unsigned long long EPOCH_DIFF = 11644473600000000ULL; /* Microseconds between 1601 and 1970 */
+        unsigned long long microseconds = li.QuadPart / 10ULL - EPOCH_DIFF;
+
+        return static_cast<unsigned long>(microseconds);
+#else
+        /* Linux and other POSIX systems */
         struct timeval tv;
 
         gettimeofday(&tv, NULL);
@@ -100,6 +119,7 @@ namespace xtree {
         ret += (tv.tv_sec * 1000000);
 
         return ret;
+#endif
     }
 
 }

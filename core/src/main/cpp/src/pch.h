@@ -24,8 +24,14 @@
 // Fix for Boost bind deprecation warning
 #define BOOST_BIND_GLOBAL_PLACEHOLDERS
 
-#include <sys/time.h>
-#include <ctime>
+// Platform-specific includes
+#ifdef _WIN32
+    #include <windows.h>
+    #include <ctime>
+#else
+    #include <sys/time.h>
+    #include <ctime>
+#endif
 #include <cassert>
 #include <cstring>
 #include <sstream>
