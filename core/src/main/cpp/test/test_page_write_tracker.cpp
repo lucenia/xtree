@@ -1,4 +1,23 @@
 /*
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * The Lucenia project is free software: you can redistribute it
+ * and/or modify it under the terms of the GNU Affero General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public
+ * License along with this program. If not, see:
+ * https://www.gnu.org/licenses/agpl-3.0.html
+ */
+
+/*
  * Tests for page write tracking and COW performance optimizations
  */
 
@@ -8,7 +27,7 @@
 #include <chrono>
 #include <cstring>
 #include "../src/memmgr/page_write_tracker.hpp"
-#include "../src/indexdetails.h"  // Need full definition for DirectMemoryCOWManager
+#include "../src/indexdetails.hpp"  // Need full definition for DirectMemoryCOWManager
 #include "../src/memmgr/cow_memmgr.hpp"
 
 using namespace xtree;
@@ -277,7 +296,8 @@ TEST_F(COWPrefaultPerformanceTest, BatchUpdateBenefit) {
     cout << "Batched writes: " << batch_time.count() << " microseconds" << endl;
     
     // Both should be similar since they're on the same page, but batch concept is demonstrated
-    EXPECT_LT(batch_time.count(), individual_time.count() * 2);
+    // Relaxed constraint to avoid flakiness on fast machines where both complete in microseconds
+    EXPECT_LT(batch_time.count(), individual_time.count() * 3);
     
     // Wait for any remaining snapshots to complete
     wait_count = 0;

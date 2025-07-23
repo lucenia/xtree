@@ -1,19 +1,20 @@
 /*
- * SPDX-License-Identifier: SSPL-1.0
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * The Lucenia project is source-available software: you can
- * redistribute it and/or modify it under the terms of the
- * Server Side Public License, version 1, as published by
- * MongoDB, Inc.
+ * The Lucenia project is free software: you can redistribute it
+ * and/or modify it under the terms of the GNU Affero General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
  *
- * As per the terms of the Server Side Public License, if you
- * make the functionality of this program or a modified version
- * available over a network, you must make the source code
- * available for download.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
  *
- * The full text of the Server Side Public License, version 1,
- * can be found at:
- * https://www.mongodb.com/licensing/server-side-public-license
+ * You should have received a copy of the GNU Affero General Public
+ * License along with this program. If not, see:
+ * https://www.gnu.org/licenses/agpl-3.0.html
  */
 
 #pragma once
@@ -21,6 +22,8 @@
 #include "pch.h"
 #include "uniqueid.h"
 #include "lru.hpp"
+#include "memmgr/cow_memmgr.hpp"
+#include "cow_allocator.hpp"
 
 namespace xtree {
 
@@ -35,10 +38,11 @@ namespace xtree {
     public:
 
         IndexDetails( const unsigned short dimension, const unsigned short precision,
-                      vector<const char*> *dimLabels, long xtMaxMem, JNIEnv* env, jobject* xtPOJO ) :
+                      vector<const char*> *dimLabels, long xtMaxMem, JNIEnv* env, jobject* xtPOJO,
+                      bool use_cow = false, const std::string& snapshot_file = "xtree.snapshot" ) :
             _xtPOJO(xtPOJO), _dimension(dimension), _dimensionLabels(dimLabels),
             _precision(precision)/*, _cache(getAvailableSystemMemory()*/ /*/IndexDetails<Record>::indexes.size())*/,
-            _nodeCount(0) {
+            _nodeCount(0), cow_manager_(nullptr), allocator_(nullptr) {
 //            cout << "CACHE SIZE: " << _cache.getMaxMemory() << endl;
 
             // retain a handle to the jvm (used for java callbacks)
@@ -49,6 +53,12 @@ namespace xtree {
 
             /** TODO: Working on dynamically setting the LRU memory space... this will use mlock */
 //          cout << "xtMaxMem: " << xtMaxMem << endl;
+
+            // Initialize COW manager if requested
+            if (use_cow) {
+                cow_manager_ = new DirectMemoryCOWManager<Record>(this, snapshot_file);
+                allocator_ = new COWXTreeAllocator<Record>(cow_manager_);
+            }
 
             // update cache size for each index
    //         for_each(IndexDetails<Record>::indexes.begin(),
@@ -69,6 +79,10 @@ namespace xtree {
         ~IndexDetails() {
             // Don't delete _dimensionLabels here as it's managed by the caller
             // The caller is responsible for the lifecycle of dimension labels
+            
+            // Clean up COW resources
+            delete allocator_;
+            delete cow_manager_;
         }
 
         unsigned short getDimensionCount() const {
@@ -125,6 +139,31 @@ namespace xtree {
 
 //        IRecord* getCachedNode( UniqueId recordAddress ) { return NULL; }
 
+        // COW management methods
+        bool hasCOWManager() const { return cow_manager_ != nullptr; }
+        
+        DirectMemoryCOWManager<Record>* getCOWManager() { 
+            return cow_manager_; 
+        }
+        
+        COWXTreeAllocator<Record>* getCOWAllocator() { 
+            return allocator_; 
+        }
+        
+        // Helper method to record write operations for COW tracking
+        void recordWrite(void* ptr) {
+            if (cow_manager_) {
+                cow_manager_->record_operation_with_write(ptr);
+            }
+        }
+        
+        // Helper method to record any operation for COW tracking  
+        void recordOperation() {
+            if (cow_manager_) {
+                cow_manager_->record_operation();
+            }
+        }
+
         /**
          * Serializes an IndexDetail for persistence in HDFS
          **/
@@ -139,6 +178,10 @@ namespace xtree {
         static JNIEnv *jvm;
         static vector<IndexDetails<Record>*> indexes;
         static LRUCache<IRecord, UniqueId, LRUDeleteNone> cache;
+        
+        // COW memory management (optional)
+        DirectMemoryCOWManager<Record>* cow_manager_;
+        COWXTreeAllocator<Record>* allocator_;
 
         jobject* _xtPOJO;
         unsigned short _dimension;                              // 2 bytes

@@ -1,19 +1,20 @@
 /*
- * SPDX-License-Identifier: SSPL-1.0
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * The Lucenia project is source-available software: you can
- * redistribute it and/or modify it under the terms of the
- * Server Side Public License, version 1, as published by
- * MongoDB, Inc.
+ * The Lucenia project is free software: you can redistribute it
+ * and/or modify it under the terms of the GNU Affero General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
  *
- * As per the terms of the Server Side Public License, if you
- * make the functionality of this program or a modified version
- * available over a network, you must make the source code
- * available for download.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
  *
- * The full text of the Server Side Public License, version 1,
- * can be found at:
- * https://www.mongodb.com/licensing/server-side-public-license
+ * You should have received a copy of the GNU Affero General Public
+ * License along with this program. If not, see:
+ * https://www.gnu.org/licenses/agpl-3.0.html
  */
 
 #include "xtree.h"
@@ -331,7 +332,10 @@ namespace xtree {
     template< class RecordType >
     void XTreeBucket<RecordType>::splitCommit( CacheNode* thisCacheNode, KeyMBR* mbr1, KeyMBR* mbr2, const unsigned int &split_index ) {
         // create a new XTreeBucket to hold MBR2 contents
-        XTreeBucket<RecordType>* splitBucket = new XTreeBucket<RecordType>(this->_idx, false, mbr2, this->getChildren(), split_index, this->_leaf, this->_n);
+        XTreeBucket<RecordType>* splitBucket = XAlloc<RecordType>::allocate_bucket(
+            this->_idx, false, mbr2, this->getChildren(), split_index, this->_leaf, this->_n);
+        // Track the allocation for COW
+        XAlloc<RecordType>::record_write(this->_idx, splitBucket);
         // cache the new split bucket
         CacheNode* cachedSplitNode = this->_idx->getCache().add( _idx->getNextNodeID(), splitBucket);
 
@@ -366,7 +370,9 @@ namespace xtree {
 //        cout << "***************************** SPLITTING THE ROOT *************************" << endl;
         XTreeBucket<RecordType>* splitBucket = reinterpret_cast<XTreeBucket<RecordType>*>(cachedSplitBucket->object);
         // create a new root bucket
-        XTreeBucket<RecordType>* rootBucket = new XTreeBucket<RecordType>(this->_idx, true);
+        XTreeBucket<RecordType>* rootBucket = XAlloc<RecordType>::allocate_bucket(this->_idx, true);
+        // Track the allocation for COW
+        XAlloc<RecordType>::record_write(this->_idx, rootBucket);
         // cache the root bucket
         CacheNode* cachedRootNode = this->_idx->getCache().add( _idx->getNextNodeID(), rootBucket);
 

@@ -1,17 +1,19 @@
- # -----------------------------------------------------------------------------
- # SPDX-License-Identifier: SSPL-1.0
- #
- # The Lucenia project is source-available software: you can redistribute it
- # and/or modify it under the terms of the Server Side Public License, version 1,
- # as published by MongoDB, Inc.
- #
- # As per the terms of the SSPL, if you make the functionality of this program
- # or a modified version available to third parties as a service, you must make
- # the source code available under this license.
- #
- # The full text of the Server Side Public License can be found at:
- # https://www.mongodb.com/licensing/server-side-public-license
- # -----------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# The Lucenia project is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at your
+# option) any later version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for more
+# details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program. If not, see: https://www.gnu.org/licenses/agpl-3.0.html
+# -----------------------------------------------------------------------------
 
 function(load_properties_file FILEPATH PREFIX)
     file(READ "${FILEPATH}" FILE_CONTENTS)

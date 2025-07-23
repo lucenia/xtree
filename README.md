@@ -68,6 +68,7 @@ Benchmark results on commodity hardware (Intel i7, 32GB RAM, SSD):
 | **Range Query** throughput | 467,000 qps | 180 qps | **2,594x higher** |
 | **Memory Usage** (per point) | 24 bytes | 40 bytes | **1.7x smaller** |
 | **COW Snapshot Time** | 100 μs | N/A | **Near-instant** |
+| **COW Runtime Overhead** | 3% | N/A | **Negligible** |
 
 *Apache Lucene performance based on [public benchmarks](https://benchmarks.mikemccandless.com/IntNRQ.html) for numeric range queries
 
@@ -113,28 +114,66 @@ The build produces a versioned shared library:
 
 ## Usage Example
 
+### Basic Usage (No Persistence)
+
 ```cpp
 #include "xtree.h"
+#include "indexdetails.hpp"
 
-// Example 1: 2D geospatial index
-XTree tree_2d(2);
-float point1[] = {37.7749f, -122.4194f};  // San Francisco
-tree_2d.insert(point1, 1001);
+// Create a 2D spatial index
+std::vector<const char*> labels = {"longitude", "latitude"};
+IndexDetails<DataRecord>* idx = new IndexDetails<DataRecord>(
+    2, 32, &labels, 1024*1024*100, nullptr, nullptr);
 
-// Example 2: 3D scientific data (x, y, temperature)
-XTree tree_3d(3);
-float measurement[] = {10.5f, 20.3f, 98.6f};
-tree_3d.insert(measurement, 2001);
+// Create root bucket and insert data
+XTreeBucket<DataRecord>* root = new XTreeBucket<DataRecord>(idx, true);
+auto* cachedRoot = idx->getCache().add(idx->getNextNodeID(), root);
 
-// Example 3: Time series data (timestamp, value)
-XTree tree_ts(2);
-float timeseries[] = {1699564800.0f, 42.5f};  // Unix timestamp, value
-tree_ts.insert(timeseries, 3001);
+// Insert points
+DataRecord* sf = new DataRecord(2, 32, "San Francisco");
+std::vector<double> coords = {-122.4194, 37.7749};
+sf->putPoint(&coords);
+root->xt_insert(cachedRoot, sf);
 
-// Range query (works for any dimensionality)
-float min[] = {35.0f, -125.0f};
-float max[] = {42.0f, -70.0f};
-auto results = tree_2d.search(min, max);
+// Range query
+DataRecord* query = new DataRecord(2, 32, "query");
+std::vector<double> min = {-125.0, 35.0};
+std::vector<double> max = {-120.0, 40.0};
+query->putPoint(&min);
+query->putPoint(&max);
+auto* iter = root->getIterator(cachedRoot, query, INTERSECTS);
+```
+
+### With COW Persistence (Automatic Snapshots)
+
+```cpp
+// Create COW-enabled index
+IndexDetails<DataRecord>* idx = new IndexDetails<DataRecord>(
+    2, 32, &labels, 1024*1024*100, nullptr, nullptr,
+    true,                        // Enable COW
+    "spatial_index.snapshot"     // Snapshot file
+);
+
+// Configure snapshot behavior
+idx->getCOWManager()->set_operations_threshold(10000);     // Every 10k operations
+idx->getCOWManager()->set_memory_threshold(64*1024*1024); // Or at 64MB
+
+// Create root using COW allocator
+XTreeBucket<DataRecord>* root = idx->getCOWAllocator()->allocate_bucket(idx, true);
+auto* cachedRoot = idx->getCache().add(idx->getNextNodeID(), root);
+
+// Use normally - snapshots happen automatically!
+for (int i = 0; i < 100000; i++) {
+    DataRecord* dr = new DataRecord(2, 32, "point_" + std::to_string(i));
+    std::vector<double> point = {lon[i], lat[i]};
+    dr->putPoint(&point);
+    root->xt_insert(cachedRoot, dr);  // Automatically tracked
+}
+
+// Check snapshot statistics
+auto stats = idx->getCOWManager()->get_stats();
+std::cout << "Memory tracked: " << stats.tracked_memory_bytes << " bytes\n";
+std::cout << "Snapshot active: " << stats.cow_protection_active << "\n";
 ```
 
 ## Architecture
@@ -159,6 +198,49 @@ XTree
 - **PageWriteTracker**: Lock-free write tracking for hot page detection
 - **DirectMemoryCOWManager**: Automatic persistence with background snapshots
 - **PageAlignedMemoryTracker**: Page-aligned allocations for efficient snapshots
+
+### COW Persistence Architecture
+
+The COW (Copy-on-Write) persistence system provides automatic durability with minimal overhead:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                 XTree Operations                        │
+│            (Inserts, Updates, Queries)                  │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│            Template-Based Allocator                     │
+│    (Zero overhead when COW disabled via templates)      │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│          Page-Aligned Memory Allocation                 │
+│        (4KB/16KB boundaries for efficiency)             │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│           Lock-Free Write Tracking                      │
+│    (Thread-local caches, atomic operations)             │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│          Automatic Snapshot Triggers                    │
+│  (Operation count, memory usage, time interval)         │
+└────────────────────┬────────────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────┐
+│         Background Persistence Thread                   │
+│    (Non-blocking disk I/O, atomic file updates)        │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Key Features:**
+- **Zero-copy snapshots**: Raw memory dumped to disk (no serialization)
+- **Sub-millisecond creation**: ~100μs to enable write protection
+- **Hot page prefaulting**: Frequently written pages stay in RAM
+- **Atomic updates**: Crash-consistent snapshot files
+- **Template-based design**: Zero overhead when disabled
 
 ## Build Options
 

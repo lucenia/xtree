@@ -1,19 +1,20 @@
 /*
- * SPDX-License-Identifier: SSPL-1.0
+ * SPDX-License-Identifier: AGPL-3.0-or-later
  *
- * The Lucenia project is source-available software: you can
- * redistribute it and/or modify it under the terms of the
- * Server Side Public License, version 1, as published by
- * MongoDB, Inc.
+ * The Lucenia project is free software: you can redistribute it
+ * and/or modify it under the terms of the GNU Affero General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
  *
- * As per the terms of the Server Side Public License, if you
- * make the functionality of this program or a modified version
- * available over a network, you must make the source code
- * available for download.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
  *
- * The full text of the Server Side Public License, version 1,
- * can be found at:
- * https://www.mongodb.com/licensing/server-side-public-license
+ * You should have received a copy of the GNU Affero General Public
+ * License along with this program. If not, see:
+ * https://www.gnu.org/licenses/agpl-3.0.html
  */
 
 #pragma once

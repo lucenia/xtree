@@ -1,4 +1,23 @@
 /*
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * The Lucenia project is free software: you can redistribute it
+ * and/or modify it under the terms of the GNU Affero General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public
+ * License along with this program. If not, see:
+ * https://www.gnu.org/licenses/agpl-3.0.html
+ */
+
+/*
  * Example: Integrating COW Memory Manager with existing XTree
  * 
  * This example shows how to add COW persistence to your existing XTree
@@ -10,8 +29,7 @@
 #include <vector>
 #include <chrono>
 #include "../src/xtree.h"
-#include "../src/indexdetails.h"
-#include "../src/datarecord.h"
+#include "../src/indexdetails.hpp"
 #include "../src/memmgr/cow_memmgr.hpp"
 
 using namespace xtree;
@@ -88,7 +106,7 @@ int main() {
     // Step 4: Normal XTree operations - COW tracks everything automatically
     cout << "Inserting 10,000 spatial records...\n";
     
-    auto insert_start = chrono::high_resolution_clock::now();
+    auto insert_start = std::chrono::high_resolution_clock::now();
     
     for (int i = 0; i < 10000; i++) {
         // Create spatial data
@@ -114,8 +132,8 @@ int main() {
         }
     }
     
-    auto insert_end = chrono::high_resolution_clock::now();
-    auto insert_time = chrono::duration_cast<chrono::milliseconds>(insert_end - insert_start);
+    auto insert_end = std::chrono::high_resolution_clock::now();
+    auto insert_time = std::chrono::duration_cast<std::chrono::milliseconds>(insert_end - insert_start);
     
     cout << "\nInsertions complete in " << insert_time.count() << " ms\n";
     cout << "Average: " << (10000.0 / insert_time.count()) * 1000 << " inserts/second\n\n";
@@ -123,11 +141,11 @@ int main() {
     // Step 5: Demonstrate COW snapshot
     cout << "Creating COW snapshot...\n";
     
-    auto snapshot_start = chrono::high_resolution_clock::now();
+    auto snapshot_start = std::chrono::high_resolution_clock::now();
     cow_manager->trigger_memory_snapshot();
-    auto snapshot_end = chrono::high_resolution_clock::now();
+    auto snapshot_end = std::chrono::high_resolution_clock::now();
     
-    auto snapshot_time = chrono::duration_cast<chrono::microseconds>(snapshot_end - snapshot_start);
+    auto snapshot_time = std::chrono::duration_cast<std::chrono::microseconds>(snapshot_end - snapshot_start);
     cout << "Snapshot created in " << snapshot_time.count() << " microseconds!\n";
     
     // The snapshot is now being persisted in the background
