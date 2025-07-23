@@ -24,7 +24,7 @@ namespace xtree {
 
     ILogger iLogger;
     boost::mutex Logger::sm;
-    FILE* Logger::logfile;
+    FILE* Logger::logfile = nullptr;
     thread_specific_ptr<Logger> Logger::tsp;
     
 #ifdef _WIN32
@@ -72,13 +72,18 @@ namespace xtree {
 
         if( t ) t->write(logLevel,out);
 
-        assert(logfile);
-        if(fprintf(logfile, "%s", oss.str().c_str())>=0) {
-            fflush(logfile);
-        }
-        else {
-            int x = errno;
-            cerr << "Failed to write to logfile: " << errnoWithDescription(x) << ": " << out << endl;
+        if (logfile) {
+            if(fprintf(logfile, "%s", oss.str().c_str())>=0) {
+                fflush(logfile);
+            }
+            else {
+                int x = errno;
+                cerr << "Failed to write to logfile: " << errnoWithDescription(x) << ": " << out << endl;
+            }
+        } else {
+            // If no logfile is set, output to stderr
+            fprintf(stderr, "%s", oss.str().c_str());
+            fflush(stderr);
         }
         _init();
     }
