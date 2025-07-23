@@ -234,10 +234,8 @@ if(WIN32)
     message(STATUS "  VCPKG_TARGET_TRIPLET: ${VCPKG_TARGET_TRIPLET}")
 endif()
 
-# For Windows with vcpkg, let vcpkg handle everything
+# For Windows with vcpkg, configure Boost discovery settings
 if(WIN32 AND CMAKE_TOOLCHAIN_FILE)
-    # Ensure we use the vcpkg provided Boost
-    set(Boost_NO_SYSTEM_PATHS ON)
     message(STATUS "Using vcpkg toolchain for Boost discovery")
 endif()
 
@@ -246,12 +244,33 @@ if(WIN32 AND NOT CMAKE_TOOLCHAIN_FILE)
     # Check common vcpkg installation paths
     if(EXISTS "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
         set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
-        set(Boost_NO_SYSTEM_PATHS ON)
         message(STATUS "Found vcpkg toolchain at C:/vcpkg, using for Boost")
+        # Include the toolchain file to set up vcpkg paths
+        include("${CMAKE_TOOLCHAIN_FILE}")
     elseif(EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
         set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
-        set(Boost_NO_SYSTEM_PATHS ON)
         message(STATUS "Found vcpkg toolchain via VCPKG_ROOT, using for Boost")
+        # Include the toolchain file to set up vcpkg paths
+        include("${CMAKE_TOOLCHAIN_FILE}")
+    endif()
+endif()
+
+# Additional Windows-specific Boost hints for vcpkg
+if(WIN32 AND EXISTS "C:/vcpkg/installed")
+    # Try to detect the vcpkg triplet
+    if(NOT VCPKG_TARGET_TRIPLET)
+        if(EXISTS "C:/vcpkg/installed/x64-mingw-static")
+            set(VCPKG_TARGET_TRIPLET "x64-mingw-static")
+        elseif(EXISTS "C:/vcpkg/installed/x64-windows")
+            set(VCPKG_TARGET_TRIPLET "x64-windows")
+        endif()
+    endif()
+    
+    # Add vcpkg paths to CMAKE_PREFIX_PATH
+    if(VCPKG_TARGET_TRIPLET)
+        list(APPEND CMAKE_PREFIX_PATH "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
+        set(BOOST_ROOT "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
+        message(STATUS "Added vcpkg paths for triplet: ${VCPKG_TARGET_TRIPLET}")
     endif()
 endif()
 
