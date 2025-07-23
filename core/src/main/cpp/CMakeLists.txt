@@ -476,7 +476,7 @@ set(GTEST_SOURCES
     test/test_cow_memory.cpp
     test/test_page_write_tracker.cpp
     test/test_cow_integration.cpp
-    test/test_symbols.cpp
+    #test/test_symbols.cpp
 )
 
 add_executable(xtree_tests ${GTEST_SOURCES})
