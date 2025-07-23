@@ -34,8 +34,13 @@
 #include <unordered_map>
 #include <vector>
 #include <cstdlib>
+#ifndef _WIN32
 #include <sys/stat.h>
 #include <fcntl.h>
+#else
+#include <io.h>
+#include <direct.h>
+#endif
 
 #ifdef __linux__
 #include <sys/mman.h>

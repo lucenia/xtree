@@ -35,10 +35,20 @@ namespace xtree {
         LogManager(string logpath="") : _enabled(0), _file(0) {
             cout << "all native output going to: ";
             string lp = "";
-            if(!logpath.empty())
+            if(!logpath.empty()) {
+#ifdef _WIN32
+            	lp = logpath + "\\xtree.log";
+#else
             	lp = logpath + "/xtree.log";
-            else
+#endif
+            }
+            else {
+#ifdef _WIN32
+            	lp = string(getenv("ACCUMULO_HOME")) + "\\logs\\xtree.log";
+#else
             	lp = string(getenv("ACCUMULO_HOME")) + "/logs/xtree.log";
+#endif
+            }
             cout << lp << endl;
 
             initLogger(lp, true);
