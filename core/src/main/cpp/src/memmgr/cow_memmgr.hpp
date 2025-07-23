@@ -53,6 +53,9 @@
 #endif
 
 #ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX  // Prevent Windows from defining min/max macros
+#endif
 #include <windows.h>
 #endif
 

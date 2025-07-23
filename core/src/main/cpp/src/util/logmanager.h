@@ -24,6 +24,9 @@
 #include <cxxabi.h>
 #include <sys/file.h>
 #else
+#ifndef NOMINMAX
+#define NOMINMAX  // Prevent Windows from defining min/max macros
+#endif
 #include <windows.h>
 #include <io.h>
 #include <fcntl.h>

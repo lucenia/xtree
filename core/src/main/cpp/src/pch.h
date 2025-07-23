@@ -26,6 +26,7 @@
 
 // Platform-specific includes
 #ifdef _WIN32
+    #define NOMINMAX  // Prevent Windows from defining min/max macros
     #include <windows.h>
     #include <ctime>
 #else

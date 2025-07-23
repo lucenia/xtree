@@ -25,13 +25,11 @@ namespace xtree {
 
 #ifdef __GNUC__
 #include <unistd.h>
-    size_t getTotalSystemMemory();
-    size_t getAvailableSystemMemory();
 #endif
 
-#ifdef WIN32
-#include <windows.h>
+#if defined(__GNUC__) || defined(_WIN32) || defined(WIN32)
     size_t getTotalSystemMemory();
+    size_t getAvailableSystemMemory();
 #endif
 
     /* Returns the amount of milliseconds elapsed since the UNIX epoch. Works on both

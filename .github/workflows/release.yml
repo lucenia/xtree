@@ -92,7 +92,7 @@ jobs:
       - name: Install Boost libraries (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          vcpkg install boost-system:x64-windows boost-filesystem:x64-windows boost-thread:x64-windows boost-iostreams:x64-windows boost-variant:x64-windows boost-spirit:x64-windows boost-bind:x64-windows boost-function:x64-windows boost-config:x64-windows boost-io:x64-windows
+          vcpkg install boost-system:x64-windows boost-filesystem:x64-windows boost-thread:x64-windows boost-iostreams:x64-windows boost-variant:x64-windows boost-spirit:x64-windows boost-bind:x64-windows boost-function:x64-windows boost-config:x64-windows boost-io:x64-windows boost-uuid:x64-windows
           echo "CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake" >> $GITHUB_ENV
           echo "VCPKG_TARGET_TRIPLET=x64-windows" >> $GITHUB_ENV
         shell: cmd
