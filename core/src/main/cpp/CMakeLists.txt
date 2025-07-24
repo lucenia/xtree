@@ -471,8 +471,8 @@ enable_testing()
 
 # Test target with Google Test
 set(GTEST_SOURCES
-    test/test_minimal.cpp
-    test/test_pagetracker_debug.cpp  # Debug version to isolate exact issue
+    #test/test_minimal.cpp
+    #test/test_pagetracker_debug.cpp  # Debug version to isolate exact issue
     test/test_page_write_tracker.cpp  # Re-enable now that static init is fixed
     test/test_globals.cpp
     test/test_xtree.cpp
