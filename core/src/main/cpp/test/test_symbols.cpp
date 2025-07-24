@@ -24,12 +24,9 @@
 #include "../src/memmgr/cow_memmgr.hpp"
 
 namespace xtree {
-    // Define the static members that are causing linking issues
-    boost::thread_specific_ptr<Logger> Logger::tsp;
-    
-    // Explicitly initialize RUNTIME_PAGE_SIZE for test environment
-    // This ensures it gets the correct value in test context
-    const size_t PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE = 4096; // Direct value for Windows
+    // RUNTIME_PAGE_SIZE is now implemented as a zero-overhead lazy initialization function
+    // No static initialization needed - this avoids Windows hanging issues
+    // Logger::tsp is now defined in the main library, no need for test definition
     
     // Initialize logging for tests - only enable when _DEBUG is defined
     struct TestLoggerInitializer {

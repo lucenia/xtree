@@ -37,7 +37,7 @@ using namespace std::chrono;
 class PageWriteTrackerTest : public ::testing::Test {
 protected:
     size_t GetTestPageSize() const {
-        return PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+        return PageAlignedMemoryTracker::get_cached_page_size();
     }
     
     void SetUp() override {
@@ -136,7 +136,7 @@ TEST_F(PageWriteTrackerTest, PageAlignment) {
 
 // Test batch update coordinator
 TEST(BatchUpdateCoordinatorTest, BasicBatching) {
-    BatchUpdateCoordinator<int> coordinator(PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE);
+    BatchUpdateCoordinator<int> coordinator(PageAlignedMemoryTracker::get_cached_page_size());
     
     vector<int> values(10, 0);
     
@@ -223,7 +223,7 @@ protected:
     }
 };
 
-const size_t COWPrefaultPerformanceTest::PAGE_SIZE = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+const size_t COWPrefaultPerformanceTest::PAGE_SIZE = PageAlignedMemoryTracker::get_cached_page_size();
 
 TEST_F(COWPrefaultPerformanceTest, PrefaultBenefit) {
     // Make some pages "hot" by writing to them frequently
@@ -330,7 +330,7 @@ TEST_F(COWPrefaultPerformanceTest, BatchUpdateBenefit) {
 // Test memory leak prevention in tracking system
 TEST(MemoryLeakTest, NoLeaksInTrackingSystem) {
     // Create and destroy multiple COW managers to test cleanup
-    const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+    const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
     
     for (int i = 0; i < 5; i++) {
         auto cow_manager = make_unique<DirectMemoryCOWManager<DataRecord>>(nullptr, "leak_test.snapshot");

@@ -182,7 +182,7 @@ TEST_F(COWMemoryTest, COWAllocatorTest) {
     ASSERT_NE(data, nullptr);
     
     // Should be page-aligned
-    EXPECT_EQ(reinterpret_cast<uintptr_t>(data) % PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE, 0);
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(data) % PageAlignedMemoryTracker::get_cached_page_size(), 0);
     
     // Fill with test data
     for (int i = 0; i < 1000; i++) {
@@ -357,7 +357,7 @@ TEST_F(COWMemoryTest, BatchRegistration) {
         const int BATCH_SIZE = 100;
         
         // Allocate memory regions
-        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+        const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
         for (int i = 0; i < BATCH_SIZE; i++) {
             void* mem = PageAlignedMemoryTracker::allocate_aligned(page_size);
             ASSERT_NE(mem, nullptr);
@@ -386,7 +386,7 @@ TEST_F(COWMemoryTest, BatchRegistration) {
     // Test 2: Compare batch vs individual registration performance
     {
         const int PERF_BATCH_SIZE = 1000;
-        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+        const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
         vector<void*> batch_allocs;
         vector<void*> individual_allocs;
         
@@ -437,7 +437,7 @@ TEST_F(COWMemoryTest, BatchRegistration) {
     {
         vector<void*> snapshot_allocs;
         const int SNAPSHOT_BATCH_SIZE = 50;
-        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+        const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
         
         // Register batch of memory
         cow_manager->begin_batch_registration();
@@ -473,7 +473,7 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
         
         vector<void*> allocations;
         const int BATCH_SIZE = 100;
-        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+        const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
         
         // Allocate and register memory
         cow_manager->begin_batch_registration();
@@ -508,7 +508,7 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
     // Test 2: Memory leak detection - ensure unregistered memory doesn't leak tracking
     {
         const int LEAK_TEST_SIZE = 500;
-        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+        const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
         vector<void*> leak_test_allocs;
         
         auto initial_stats = cow_manager->get_stats();
@@ -553,7 +553,7 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
     // Test 3: COW protection cleanup on unregistration
     {
         const int PROTECTION_TEST_SIZE = 10;
-        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+        const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
         vector<void*> protected_allocs;
         
         // Allocate and register memory
@@ -588,7 +588,7 @@ TEST_F(COWMemoryTest, BatchUnregistrationAndLeakPrevention) {
     {
         const int STRESS_CYCLES = 100;
         const int ALLOCS_PER_CYCLE = 50;
-        const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+        const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
         
         auto initial_stats = cow_manager->get_stats();
         size_t initial_memory = initial_stats.tracked_memory_bytes;

@@ -304,7 +304,18 @@ if(WIN32)
 endif()
 
 # Try to find Boost with vcpkg first
+# First try modern CMake config approach
 find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
+
+# If not found, try legacy FindBoost for local Windows environments
+if(NOT Boost_FOUND AND WIN32)
+    # Use legacy FindBoost module for local Windows setups
+    cmake_policy(SET CMP0167 OLD)
+    set(Boost_USE_STATIC_LIBS OFF)
+    set(Boost_USE_MULTITHREADED ON) 
+    set(Boost_USE_STATIC_RUNTIME OFF)
+    find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
+endif()
 
 # If not found and on Windows, try alternative approaches
 if(NOT Boost_FOUND AND WIN32)
@@ -460,6 +471,9 @@ enable_testing()
 
 # Test target with Google Test
 set(GTEST_SOURCES
+    test/test_minimal.cpp
+    test/test_pagetracker_debug.cpp  # Debug version to isolate exact issue
+    test/test_page_write_tracker.cpp  # Re-enable now that static init is fixed
     test/test_globals.cpp
     test/test_xtree.cpp
     test/test_keymbr.cpp
@@ -469,16 +483,15 @@ set(GTEST_SOURCES
     test/test_float_utils.cpp
     test/test_performance.cpp
     test/test_cow_memory.cpp
-    test/test_page_write_tracker.cpp
     test/test_cow_integration.cpp
-    #test/test_symbols.cpp
+    test/test_symbols.cpp
 )
 
 add_executable(xtree_tests ${GTEST_SOURCES})
 
 target_link_libraries(xtree_tests 
-    XTree 
-    ${Boost_LIBRARIES}
+    XTree  # Add back for PageWriteTracker test
+    ${Boost_LIBRARIES}  # Re-enable Boost now that static init is fixed
     gtest
     gtest_main
     gmock
@@ -488,6 +501,19 @@ target_link_libraries(xtree_tests
 include(GoogleTest)
 # Disable test discovery during build to avoid segfaults
 # gtest_discover_tests(xtree_tests)
+
+# Windows-specific: Inform user about Boost DLL PATH requirement for tests
+if(WIN32 AND NOT Boost_USE_STATIC_LIBS)
+    message(STATUS "")
+    message(STATUS "============================================================")
+    message(STATUS "Windows Test Configuration:")
+    message(STATUS "To run tests with './gradlew test', ensure Boost DLLs are in PATH.")
+    message(STATUS "Add your Boost library directory to system PATH, for example:")
+    message(STATUS "  C:/local/boost_1_88_0/stage/lib")
+    message(STATUS "Or set BOOST_ROOT environment variable to your Boost installation.")
+    message(STATUS "============================================================")
+    message(STATUS "")
+endif()
 
 # Install
 if(TARGET XTree)

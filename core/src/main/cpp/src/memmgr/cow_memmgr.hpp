@@ -99,8 +99,11 @@ public:
 #endif
     }
     
-    // Page size determined at runtime
-    static const size_t RUNTIME_PAGE_SIZE;
+    // Zero-overhead cached page size for all use cases
+    static const size_t& get_cached_page_size() {
+        static const size_t cached_size = get_page_size();
+        return cached_size;
+    }
     
     // Use unordered_map for O(1) lookups by address
     std::unordered_map<void*, MemoryRegion> tracked_regions_;
@@ -119,7 +122,7 @@ private:
 
 public:
     PageAlignedMemoryTracker() 
-        : write_tracker_(std::make_unique<PageWriteTracker>(RUNTIME_PAGE_SIZE)) {}
+        : write_tracker_(std::make_unique<PageWriteTracker>(get_cached_page_size())) {}
     
     ~PageAlignedMemoryTracker() {
         // Disable COW protection on all regions before destruction
@@ -139,9 +142,10 @@ public:
         
         // Align to page boundaries
         uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
-        uintptr_t aligned_start = start & ~(RUNTIME_PAGE_SIZE - 1);  // Round down
+        const size_t page_size = get_cached_page_size();
+        uintptr_t aligned_start = start & ~(page_size - 1);  // Round down
         uintptr_t end = start + size;
-        uintptr_t aligned_end = (end + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);  // Round up
+        uintptr_t aligned_end = (end + page_size - 1) & ~(page_size - 1);  // Round up
         
         MemoryRegion region{};
         region.start_addr = reinterpret_cast<void*>(aligned_start);
@@ -171,12 +175,13 @@ public:
     void batch_register_commit() {
         std::unique_lock<std::shared_mutex> lock(regions_lock_);
         
+        const size_t page_size = get_cached_page_size();
         for (const auto& [ptr, size] : batch_registration_.pending_regions) {
             // Align to page boundaries
             uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
-            uintptr_t aligned_start = start & ~(RUNTIME_PAGE_SIZE - 1);
+            uintptr_t aligned_start = start & ~(page_size - 1);
             uintptr_t end = start + size;
-            uintptr_t aligned_end = (end + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);
+            uintptr_t aligned_end = (end + page_size - 1) & ~(page_size - 1);
             
             MemoryRegion region{};
             region.start_addr = reinterpret_cast<void*>(aligned_start);
@@ -246,7 +251,7 @@ public:
         
         // Align the pointer to find the key
         uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-        uintptr_t aligned_addr = addr & ~(RUNTIME_PAGE_SIZE - 1);
+        uintptr_t aligned_addr = addr & ~(get_cached_page_size() - 1);
         void* key = reinterpret_cast<void*>(aligned_addr);
         
         auto it = tracked_regions_.find(key);
@@ -283,10 +288,11 @@ public:
     void batch_unregister_commit() {
         std::unique_lock<std::shared_mutex> lock(regions_lock_);
         
+        const size_t page_size = get_cached_page_size();
         for (const auto& [ptr, _] : batch_registration_.pending_regions) {
             // Align the pointer to find the key
             uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-            uintptr_t aligned_addr = addr & ~(RUNTIME_PAGE_SIZE - 1);
+            uintptr_t aligned_addr = addr & ~(page_size - 1);
             void* key = reinterpret_cast<void*>(aligned_addr);
             
             auto it = tracked_regions_.find(key);
@@ -332,13 +338,37 @@ public:
         return write_tracker_.get();
     }
     
-    // Allocate page-aligned memory
+    // Allocate page-aligned memory with high-performance Windows fallbacks
     static void* allocate_aligned(size_t size) {
-        size_t aligned_size = (size + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);
+        const size_t page_size = get_cached_page_size();
+        size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
+        
 #ifdef _WIN32
-        return _aligned_malloc(aligned_size, RUNTIME_PAGE_SIZE);
+        // Try multiple Windows allocation strategies for best performance
+        
+        // Strategy 1: Try VirtualAlloc for page-aligned allocations (often faster)
+        if (aligned_size >= page_size) {
+            void* ptr = VirtualAlloc(nullptr, aligned_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (ptr) return ptr;
+        }
+        
+        // Strategy 2: Fallback to _aligned_malloc
+        void* ptr = _aligned_malloc(aligned_size, page_size);
+        if (ptr) return ptr;
+        
+        // Strategy 3: Manual alignment as last resort
+        void* raw_ptr = std::malloc(aligned_size + page_size);
+        if (raw_ptr) {
+            uintptr_t addr = reinterpret_cast<uintptr_t>(raw_ptr);
+            uintptr_t aligned_addr = (addr + page_size - 1) & ~(page_size - 1);
+            // Store original pointer just before aligned address for deallocation
+            *reinterpret_cast<void**>(aligned_addr - sizeof(void*)) = raw_ptr;
+            return reinterpret_cast<void*>(aligned_addr);
+        }
+        
+        return nullptr;
 #else
-        return std::aligned_alloc(RUNTIME_PAGE_SIZE, aligned_size);
+        return std::aligned_alloc(page_size, aligned_size);
 #endif
     }
     
@@ -358,10 +388,35 @@ public:
         return allocate_aligned(size);
     }
     
-    // Deallocate aligned memory
+    // Deallocate aligned memory with strategy detection
     static void deallocate_aligned(void* ptr) {
+        if (!ptr) return;
+        
 #ifdef _WIN32
-        _aligned_free(ptr);
+        // Detect allocation strategy by checking memory info
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(ptr, &mbi, sizeof(mbi)) != 0 && 
+            mbi.AllocationBase == ptr && mbi.State == MEM_COMMIT) {
+            // Strategy 1: VirtualAlloc allocated - use VirtualFree
+            VirtualFree(ptr, 0, MEM_RELEASE);
+        } else {
+            // Check if this looks like manual alignment (Strategy 3)
+            uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+            const size_t page_size = get_cached_page_size();
+            
+            // If aligned and we can find a stored pointer, it's manual alignment
+            if ((addr & (page_size - 1)) == 0 && addr >= sizeof(void*)) {
+                void** stored_ptr = reinterpret_cast<void**>(addr - sizeof(void*));
+                if (*stored_ptr && *stored_ptr < ptr) {
+                    // Strategy 3: Manual alignment - free original pointer
+                    std::free(*stored_ptr);
+                    return;
+                }
+            }
+            
+            // Strategy 2: _aligned_malloc - use _aligned_free
+            _aligned_free(ptr);
+        }
 #else
         std::free(ptr);
 #endif
@@ -398,7 +453,7 @@ public:
                           const std::string& persist_file = "xtree_memory.snapshot")
         : index_details_(index_details), persist_file_(persist_file),
           batch_coordinator_(std::make_unique<BatchUpdateCoordinator<Record>>(
-              PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE)) {
+              PageAlignedMemoryTracker::get_cached_page_size())) {
         // Start persistent background thread for periodic snapshots
         start_background_thread();
     }
@@ -646,7 +701,7 @@ public:
             }
             
             // Validate root_address is reasonable (should be at least one page)
-            if (header.root_address != 0 && header.root_address < PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE) {
+            if (header.root_address != 0 && header.root_address < PageAlignedMemoryTracker::get_cached_page_size()) {
                 return false; // Suspicious low address - likely corrupted
             }
             

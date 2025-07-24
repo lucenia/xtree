@@ -9,7 +9,7 @@
 using namespace xtree;
 
 int main() {
-    const size_t TEST_PAGE_SIZE = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+    const size_t TEST_PAGE_SIZE = PageAlignedMemoryTracker::get_cached_page_size();
     
     std::cout << "TEST_PAGE_SIZE: " << TEST_PAGE_SIZE << " (0x" << std::hex << TEST_PAGE_SIZE << ")" << std::endl;
     

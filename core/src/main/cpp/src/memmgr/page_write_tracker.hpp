@@ -373,12 +373,29 @@ public:
             bucket.store(nullptr, std::memory_order_relaxed);
         }
         
-        // Start epoch timer
-        start_epoch_timer();
+        // Don't start epoch timer here - will be started lazily on first write
     }
     
     ~PageWriteTracker() {
         // Clear thread-local cache to prevent dangling pointers
+        // On Windows, accessing thread_local during static destruction can cause deadlocks
+        // so we make this conditional and safe
+#ifdef _WIN32
+        // On Windows, only clear TLS if we're not in static destruction phase
+        // During static destruction, TLS may not be accessible safely
+        try {
+            auto& tl_cache = get_tl_cache();
+            for (auto& entry : tl_cache.entries) {
+                entry.page = nullptr;
+                entry.stats = nullptr;
+                entry.access_count = 0;
+            }
+            tl_cache.next_slot = 0;
+        } catch (...) {
+            // Ignore TLS access failures during Windows static destruction
+        }
+#else
+        // On Unix/macOS, TLS cleanup is safer during destruction
         auto& tl_cache = get_tl_cache();
         for (auto& entry : tl_cache.entries) {
             entry.page = nullptr;
@@ -386,6 +403,7 @@ public:
             entry.access_count = 0;
         }
         tl_cache.next_slot = 0;
+#endif
         
         // Stop epoch timer
         timer_running_.store(false, std::memory_order_release);
@@ -416,22 +434,39 @@ public:
     void record_write(void* ptr) {
         void* page = get_page_base(ptr);
         
-        // Debug output removed for production
+        // Lazy timer initialization - zero overhead after first call
+        static std::once_flag timer_initialized;
+        std::call_once(timer_initialized, [this]() {
+            start_epoch_timer();
+        });
         
-        // Check thread-local cache first
+        // Check thread-local cache first - with Windows safety
+#ifdef _WIN32
+        try {
+            auto& tl_cache = get_tl_cache();
+            PageStats* stats = tl_cache.find(page);
+            if (!stats) {
+                stats = find_or_create_stats(page);
+                tl_cache.insert(page, stats);
+            }
+            stats->increment_writes(hot_write_threshold_);
+            stats->update_timestamp(current_epoch_.load(std::memory_order_relaxed));
+        } catch (...) {
+            // Fallback to direct lookup without cache on Windows TLS issues
+            PageStats* stats = find_or_create_stats(page);
+            stats->increment_writes(hot_write_threshold_);
+            stats->update_timestamp(current_epoch_.load(std::memory_order_relaxed));
+        }
+#else
         auto& tl_cache = get_tl_cache();
         PageStats* stats = tl_cache.find(page);
         if (!stats) {
             stats = find_or_create_stats(page);
             tl_cache.insert(page, stats);
-            // Stats created successfully
-        } else {
-            // Found cached stats
         }
-        
-        // Lock-free updates
         stats->increment_writes(hot_write_threshold_);
         stats->update_timestamp(current_epoch_.load(std::memory_order_relaxed));
+#endif
     }
     
     void record_access(void* ptr) {
@@ -441,15 +476,30 @@ public:
         //     std::cout << "[DEBUG] record_access: ptr=" << ptr << ", page=" << page << std::endl;
         // }
         
-        // Check thread-local cache first
+        // Check thread-local cache first - with Windows safety
+#ifdef _WIN32
+        try {
+            auto& tl_cache = get_tl_cache();
+            PageStats* stats = tl_cache.find(page);
+            if (!stats) {
+                stats = find_or_create_stats(page);
+                tl_cache.insert(page, stats);
+            }
+            stats->increment_access();
+        } catch (...) {
+            // Fallback to direct lookup without cache on Windows TLS issues
+            PageStats* stats = find_or_create_stats(page);
+            stats->increment_access();
+        }
+#else
         auto& tl_cache = get_tl_cache();
         PageStats* stats = tl_cache.find(page);
         if (!stats) {
             stats = find_or_create_stats(page);
             tl_cache.insert(page, stats);
         }
-        
         stats->increment_access();
+#endif
     }
     
     std::vector<void*> get_hot_pages() const {

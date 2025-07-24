@@ -258,10 +258,44 @@ task testNative {
         def currentSuite = ""
         def testsFailed = false
         
-        def proc = new ProcessBuilder(testExecutable)
+        // Set up environment with Boost DLL path for Windows
+        def procBuilder = new ProcessBuilder(testExecutable)
             .directory(file(nativeBuildDir))
             .redirectErrorStream(true)
-            .start()
+            
+        if (System.getProperty("os.name").toLowerCase().contains("windows")) {
+            def env = procBuilder.environment()
+            def currentPath = env.get("PATH") ?: ""
+            
+            // Add common Boost DLL locations to PATH
+            def boostPaths = [
+                "C:\\local\\boost_1_88_0\\stage\\lib",
+                "C:\\boost\\stage\\lib",
+                "C:\\boost_1_88_0\\stage\\lib"
+            ]
+            
+            // Check BOOST_ROOT environment variable
+            def boostRoot = env.get("BOOST_ROOT")
+            if (boostRoot) {
+                boostPaths.add(0, "${boostRoot}\\stage\\lib".toString())
+            }
+            
+            // Add existing Boost paths that actually exist
+            def existingBoostPaths = boostPaths.findAll { path ->
+                file(path).exists()
+            }
+            
+            if (existingBoostPaths) {
+                def newPath = existingBoostPaths.join(";") + ";" + currentPath
+                env.put("PATH", newPath)
+                println "Added Boost DLL paths to runtime PATH: ${existingBoostPaths.join(', ')}"
+            } else {
+                println "Warning: No Boost DLL directories found in standard locations"
+                println "Searched: ${boostPaths.join(', ')}"
+            }
+        }
+        
+        def proc = procBuilder.start()
         
         // Simply run the tests and capture all output
         def output = new StringBuilder()
