@@ -24,7 +24,7 @@ jobs:
             arch: x86_64
             cmake-generator: "Unix Makefiles"
           - os: macos-latest
-            runs-on: macos-13
+            runs-on: [self-hosted, macOS]
             platform: Mac_OS_X
             arch: x86_64
             cmake-generator: "Unix Makefiles"
@@ -40,7 +40,7 @@ jobs:
             arch: arm64
             cmake-generator: "Unix Makefiles"
           - os: macos-latest
-            runs-on: macos-14
+            runs-on: [self-hosted, macOS]
             platform: Mac_OS_X
             arch: arm64
             cmake-generator: "Unix Makefiles"

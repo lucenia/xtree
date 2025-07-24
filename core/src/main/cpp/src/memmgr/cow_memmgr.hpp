@@ -429,17 +429,20 @@ public:
 template<class Record>
 class DirectMemoryCOWManager {
 public:
-    // Memory snapshot header
+    // Memory snapshot header - use fixed-size types for portability
+#pragma pack(push, 1)
     struct MemorySnapshotHeader {
         uint32_t magic = COW_SNAPSHOT_MAGIC;
         uint32_t version = COW_SNAPSHOT_VERSION;
-        size_t total_regions;
-        size_t total_size;
-        unsigned short dimension;
-        unsigned short precision;
-        long root_address;
-        std::chrono::system_clock::time_point snapshot_time;
+        uint64_t total_regions;      // Fixed size instead of size_t
+        uint64_t total_size;         // Fixed size instead of size_t
+        uint16_t dimension;          // Fixed size instead of unsigned short
+        uint16_t precision;          // Fixed size instead of unsigned short
+        uint32_t padding = 0;        // Explicit padding for alignment
+        uint64_t root_address;       // Fixed size instead of long
+        int64_t snapshot_time_us;    // Microseconds since epoch instead of time_point
     };
+#pragma pack(pop)
     
     // Statistics
     struct MemoryCOWStats {
@@ -682,15 +685,17 @@ public:
             
             // Validate dimension and precision match current index (if we have index_details)
             if (index_details_) {
-                if (header.dimension != index_details_->getDimensionCount() ||
-                    header.precision != index_details_->getPrecision()) {
+                if (header.dimension != static_cast<uint16_t>(index_details_->getDimensionCount()) ||
+                    header.precision != static_cast<uint16_t>(index_details_->getPrecision())) {
                     return false;
                 }
             }
             
             // Check for timestamp drift (snapshot too old)
-            auto age = std::chrono::system_clock::now() - header.snapshot_time;
-            auto age_hours = std::chrono::duration_cast<std::chrono::hours>(age).count();
+            auto now = std::chrono::system_clock::now();
+            auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+            auto age_us = now_us - header.snapshot_time_us;
+            auto age_hours = age_us / (1000000LL * 60 * 60);
             if (age_hours > 24) {
 #ifdef _DEBUG
                 std::cerr << "Warning: Snapshot is " << age_hours << " hours old\n";
@@ -701,20 +706,22 @@ public:
             }
             
             // Validate root_address is reasonable (should be at least one page)
-            if (header.root_address != 0 && header.root_address < PageAlignedMemoryTracker::get_cached_page_size()) {
+            if (header.root_address != 0 && header.root_address < static_cast<uint64_t>(PageAlignedMemoryTracker::get_cached_page_size())) {
                 return false; // Suspicious low address - likely corrupted
             }
             
-            // Read region headers
+            // Read region headers - use fixed-size types for portability
+            #pragma pack(push, 1)
             struct RegionHeader {
-                void* original_addr;
-                size_t size;
-                size_t offset_in_file;
+                uint64_t original_addr;  // Store pointer as uint64_t
+                uint64_t size;
+                uint64_t offset_in_file;
             };
+            #pragma pack(pop)
             
-            size_t expected_data_start = sizeof(MemorySnapshotHeader) + 
+            uint64_t expected_data_start = sizeof(MemorySnapshotHeader) + 
                                        (sizeof(RegionHeader) * header.total_regions);
-            size_t total_data_size = 0;
+            uint64_t total_data_size = 0;
             
             for (size_t i = 0; i < header.total_regions; i++) {
                 RegionHeader rh;
@@ -739,8 +746,8 @@ public:
             
             // Check file size matches expected size
             file.seekg(0, std::ios::end);
-            size_t file_size = file.tellg();
-            size_t expected_size = expected_data_start + total_data_size;
+            uint64_t file_size = static_cast<uint64_t>(file.tellg());
+            uint64_t expected_size = expected_data_start + total_data_size;
             
             if (file_size != expected_size) {
                 return false;
@@ -827,15 +834,18 @@ private:
         }
         // Only set if index_details is available
         if (index_details_) {
-            header.dimension = index_details_->getDimensionCount();
-            header.precision = index_details_->getPrecision();
-            header.root_address = index_details_->getRootAddress();
+            header.dimension = static_cast<uint16_t>(index_details_->getDimensionCount());
+            header.precision = static_cast<uint16_t>(index_details_->getPrecision());
+            header.root_address = static_cast<uint64_t>(index_details_->getRootAddress());
         } else {
             header.dimension = 0;
             header.precision = 0;
             header.root_address = 0;
         }
-        header.snapshot_time = std::chrono::system_clock::now();
+        // Store time as microseconds since epoch for portability
+        auto now = std::chrono::system_clock::now();
+        auto duration = now.time_since_epoch();
+        header.snapshot_time_us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
         
         file.write(reinterpret_cast<const char*>(&header), sizeof(header));
         
@@ -867,11 +877,14 @@ private:
     }
     
     void write_memory_regions_to_file(std::ofstream& file) {
+        // Use same packed structure as in validate_snapshot
+        #pragma pack(push, 1)
         struct RegionHeader {
-            void* original_addr;
-            size_t size;
-            size_t offset_in_file;
+            uint64_t original_addr;
+            uint64_t size;
+            uint64_t offset_in_file;
         };
+        #pragma pack(pop)
         
         // Copy region data while holding the lock to avoid deadlock during I/O
         std::vector<std::pair<PageAlignedMemoryTracker::MemoryRegion, std::vector<char>>> region_copies;
@@ -888,11 +901,15 @@ private:
         // Lock released here - no deadlock during I/O
         
         // First pass: write region headers
-        size_t current_offset = sizeof(MemorySnapshotHeader) + 
-                               (sizeof(RegionHeader) * region_copies.size());
+        uint64_t current_offset = sizeof(MemorySnapshotHeader) + 
+                                 (sizeof(RegionHeader) * region_copies.size());
         
         for (const auto& [region, data] : region_copies) {
-            RegionHeader rh{region.start_addr, region.size, current_offset};
+            RegionHeader rh{
+                reinterpret_cast<uint64_t>(region.start_addr),
+                static_cast<uint64_t>(region.size),
+                current_offset
+            };
             file.write(reinterpret_cast<const char*>(&rh), sizeof(rh));
             current_offset += region.size;
         }

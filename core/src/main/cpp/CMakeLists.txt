@@ -386,6 +386,7 @@ file(GLOB_RECURSE HEADER_FILES CONFIGURE_DEPENDS
 list(FILTER SRC_FILES EXCLUDE REGEX "test/.*")
 list(FILTER SRC_FILES EXCLUDE REGEX "test1.cpp")
 list(FILTER SRC_FILES EXCLUDE REGEX "examples/.*")
+list(FILTER SRC_FILES EXCLUDE REGEX "benchmarks/.*")
 
 # Add source group for IDEs
 source_group("Source Files" FILES ${SRC_FILES})
@@ -458,6 +459,11 @@ set(GTEST_SOURCES
     test/test_cow_memory.cpp
     test/test_cow_integration.cpp
     test/test_symbols.cpp
+)
+
+# Add benchmark sources (disabled by default)
+list(APPEND GTEST_SOURCES
+    benchmarks/performance_regression.cpp
 )
 
 add_executable(xtree_tests ${GTEST_SOURCES})

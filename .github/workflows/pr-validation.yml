@@ -32,7 +32,7 @@ jobs:
             runs-on: ubuntu-latest
             cmake-generator: "Unix Makefiles"
           - os: macos-latest
-            runs-on: macos-13
+            runs-on: [self-hosted, macOS]
             cmake-generator: "Unix Makefiles"
           - os: windows-latest
             runs-on: windows-latest
@@ -44,7 +44,7 @@ jobs:
             cmake-generator: "Unix Makefiles"
           - os: macos-latest
             arch: arm64
-            runs-on: macos-14
+            runs-on: [self-hosted, macOS]
             cmake-generator: "Unix Makefiles"
     
     runs-on: ${{ matrix.runs-on }}
