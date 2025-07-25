@@ -14,6 +14,16 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/uio.h>  // For vectorized I/O
+#endif
+
+#ifdef __APPLE__
+#include <sys/uio.h>  // Ensure writev is available on macOS
+#endif
+
+#ifdef _WIN32
+#include <vector>
+#include <io.h>
 #endif
 
 namespace xtree {
@@ -364,6 +374,113 @@ bool COWMemoryMappedFile::write_regions_batch(
     return true;
 }
 
+bool COWMemoryMappedFile::write_regions_vectorized(
+    const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions) {
+    
+    if (!is_mapped_ || read_only_ || regions.empty()) {
+        return false;
+    }
+    
+    // Platform-specific vectorized I/O implementation
+#if defined(__linux__) || defined(__APPLE__)
+    // Unix systems: Use vectorized memory operations
+    // First, copy data to memory-mapped regions in batch
+    for (const auto& region : regions) {
+        size_t offset = region.first;
+        const void* data = region.second.first;
+        size_t size = region.second.second;
+        
+        if (offset + size > current_size_) {
+            return false;
+        }
+        
+        void* dest = get_write_pointer(offset);
+        if (!dest) {
+            return false;
+        }
+        
+        // Use memcpy for direct memory-mapped write
+        std::memcpy(dest, data, size);
+    }
+    
+    // Update statistics
+    total_writes_.fetch_add(regions.size());
+    for (const auto& region : regions) {
+        bytes_written_.fetch_add(region.second.second);
+    }
+    
+    // Optional: Advise kernel about sequential access pattern
+    for (const auto& region : regions) {
+        void* dest = get_write_pointer(region.first);
+        if (dest) {
+#ifdef __linux__
+            // Linux-specific optimization
+            madvise(dest, region.second.second, MADV_SEQUENTIAL);
+#elif defined(__APPLE__)
+            // macOS-specific optimization  
+            madvise(dest, region.second.second, MADV_SEQUENTIAL);
+#endif
+        }
+    }
+    
+    return true;
+    
+#else
+    // Windows: Fall back to optimized batch writes
+    // Future: Could implement WriteFileGather here
+    return write_regions_batch(regions);
+#endif
+}
+
+bool COWMemoryMappedFile::write_regions_batch_optimized(
+    const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions) {
+    
+    if (!is_mapped_ || read_only_ || regions.empty()) {
+        return false;
+    }
+    
+    // Use the utility functions to optimize the batch write
+    auto batch_request = COWMMapUtils::optimize_batch_write(regions);
+    
+    if (batch_request.use_vectorized_io && batch_request.merged_regions.size() < regions.size()) {
+        // Vectorized I/O is beneficial - use merged regions
+        // We need to keep temporary buffers alive, so use persistent storage
+        std::vector<std::vector<char>> temp_buffers;
+        std::vector<std::pair<size_t, std::pair<const void*, size_t>>> merged_writes;
+        
+        temp_buffers.reserve(batch_request.merged_regions.size());
+        merged_writes.reserve(batch_request.merged_regions.size());
+        
+        for (const auto& merged_region : batch_request.merged_regions) {
+            if (merged_region.constituent_regions.size() > 1) {
+                // Multiple regions merged - create temporary buffer
+                temp_buffers.emplace_back(merged_region.total_size);
+                auto& temp_buffer = temp_buffers.back();
+                
+                // Initialize with zeros for gaps
+                std::fill(temp_buffer.begin(), temp_buffer.end(), 0);
+                
+                for (const auto& constituent : merged_region.constituent_regions) {
+                    size_t region_offset_in_merged = constituent.first - merged_region.start_offset;
+                    std::memcpy(temp_buffer.data() + region_offset_in_merged, 
+                               constituent.second.first, constituent.second.second);
+                }
+                
+                merged_writes.emplace_back(merged_region.start_offset, 
+                                         std::make_pair(temp_buffer.data(), merged_region.total_size));
+            } else {
+                // Single region - use directly
+                merged_writes.push_back(merged_region.constituent_regions[0]);
+            }
+        }
+        
+        return write_regions_vectorized(merged_writes);
+    } else {
+        // Fall back to regular batch write
+        return write_regions_batch(regions);
+    }
+}
+
 bool COWMemoryMappedFile::ensure_capacity(size_t required_size) {
     if (required_size <= max_size_) {
         return true;
@@ -562,6 +679,65 @@ bool COWMMapManager::write_cow_snapshot(const std::string& filename,
     return success;
 }
 
+bool COWMMapManager::batch_map_regions(const std::vector<std::pair<std::string, size_t>>& files_and_sizes) {
+    std::unique_lock<std::shared_mutex> lock(files_mutex_);
+    
+    // Pre-allocate space to avoid repeated allocations
+    bool all_success = true;
+    
+    for (const auto& [filename, size] : files_and_sizes) {
+        // Check if we need to clean up old files first
+        if (active_files_.size() >= max_open_files_) {
+            auto oldest = active_files_.begin();
+            active_files_.erase(oldest);
+        }
+        
+        // Create new file with specified size
+        auto file = std::make_unique<COWMemoryMappedFile>(filename, size, false);
+        if (!file->map()) {
+            all_success = false;
+            continue;
+        }
+        
+        active_files_[filename] = std::move(file);
+        total_file_operations_.fetch_add(1);
+    }
+    
+    return all_success;
+}
+
+bool COWMMapManager::write_regions_batch_merged(const std::string& filename,
+                                               const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions) {
+    
+    if (regions.empty()) {
+        return true;
+    }
+    
+    // Calculate total size needed
+    size_t max_offset = 0;
+    for (const auto& region : regions) {
+        max_offset = std::max(max_offset, region.first + region.second.second);
+    }
+    
+    COWMemoryMappedFile* file = get_or_create_file(filename, max_offset + 1024);
+    if (!file) {
+        return false;
+    }
+    
+    if (!file->ensure_capacity(max_offset + 1024)) {
+        return false;
+    }
+    
+    // Use the optimized batch write method
+    bool success = file->write_regions_batch_optimized(regions);
+    
+    if (success && enable_auto_sync_) {
+        file->sync_async();
+    }
+    
+    return success;
+}
+
 size_t COWMMapManager::get_active_file_count() const {
     std::shared_lock<std::shared_mutex> lock(files_mutex_);
     return active_files_.size();
@@ -598,6 +774,91 @@ COWMMapManager::PerformanceStats COWMMapManager::get_performance_stats() const {
 //==============================================================================
 
 namespace COWMMapUtils {
+
+std::vector<MergedRegion> merge_contiguous_regions(
+    const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions,
+    size_t merge_threshold) {
+    
+    if (regions.empty()) {
+        return {};
+    }
+    
+    // Sort regions by offset for merging
+    auto sorted_regions = regions;
+    std::sort(sorted_regions.begin(), sorted_regions.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    
+    std::vector<MergedRegion> merged_regions;
+    
+    // Start with the first region
+    size_t current_start = sorted_regions[0].first;
+    size_t current_end = current_start + sorted_regions[0].second.second;
+    MergedRegion current_merged(current_start, 0);
+    current_merged.constituent_regions.push_back(sorted_regions[0]);
+    
+    for (size_t i = 1; i < sorted_regions.size(); ++i) {
+        const auto& region = sorted_regions[i];
+        size_t region_start = region.first;
+        size_t region_end = region_start + region.second.second;
+        
+        // Check if this region can be merged with the current one
+        size_t gap = (region_start > current_end) ? (region_start - current_end) : 0;
+        
+        if (gap <= merge_threshold) {
+            // Merge this region into the current merged region
+            current_end = std::max(current_end, region_end);
+            current_merged.constituent_regions.push_back(region);
+        } else {
+            // Finalize the current merged region and start a new one
+            current_merged.total_size = current_end - current_merged.start_offset;
+            merged_regions.push_back(std::move(current_merged));
+            
+            // Start new merged region
+            current_start = region_start;
+            current_end = region_end;
+            current_merged = MergedRegion(current_start, 0);
+            current_merged.constituent_regions.push_back(region);
+        }
+    }
+    
+    // Don't forget the last merged region
+    current_merged.total_size = current_end - current_merged.start_offset;
+    merged_regions.push_back(std::move(current_merged));
+    
+    return merged_regions;
+}
+
+BatchWriteRequest optimize_batch_write(
+    const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions) {
+    
+    BatchWriteRequest request;
+    
+    if (regions.empty()) {
+        return request;
+    }
+    
+    // Calculate total write size
+    for (const auto& region : regions) {
+        request.total_write_size += region.second.second;
+    }
+    
+    // Determine merge threshold based on total size and region count
+    size_t merge_threshold = 4096; // Default 4KB threshold
+    if (regions.size() > 100) {
+        merge_threshold = 8192; // Larger threshold for many small regions
+    } else if (request.total_write_size > 1024 * 1024) {
+        merge_threshold = 16384; // Even larger for big writes
+    }
+    
+    // Merge contiguous regions
+    request.merged_regions = merge_contiguous_regions(regions, merge_threshold);
+    
+    // Decide whether to use vectorized I/O
+    size_t merge_savings = regions.size() - request.merged_regions.size();
+    request.use_vectorized_io = (merge_savings > 0) || (regions.size() > 10);
+    
+    return request;
+}
 
 size_t calculate_optimal_snapshot_size(size_t total_memory_tracked,
                                      size_t num_regions,

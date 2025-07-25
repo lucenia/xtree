@@ -103,6 +103,10 @@ public:
     // Batch operations for COW region writes
     bool write_regions_batch(const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions);
     
+    // Advanced batch operations with region merging and vectorized I/O
+    bool write_regions_vectorized(const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions);
+    bool write_regions_batch_optimized(const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions);
+    
     // Memory management
     bool flush_to_disk(size_t offset = 0, size_t size = 0); // 0 = entire file
     bool sync_async(); // Non-blocking sync
@@ -172,6 +176,11 @@ public:
     bool write_multiple_snapshots(const std::vector<std::pair<std::string, 
                                   std::vector<std::pair<const void*, size_t>>>>& snapshots);
     
+    // Advanced batch region mapping and optimization
+    bool batch_map_regions(const std::vector<std::pair<std::string, size_t>>& files_and_sizes);
+    bool write_regions_batch_merged(const std::string& filename,
+                                   const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions);
+    
     // Memory management
     bool sync_all_files(bool async = true);
     bool flush_all_files();
@@ -212,6 +221,31 @@ private:
 //==============================================================================
 
 namespace COWMMapUtils {
+    
+    // Batch optimization data structures
+    struct MergedRegion {
+        size_t start_offset;
+        size_t total_size;
+        std::vector<std::pair<size_t, std::pair<const void*, size_t>>> constituent_regions;
+        
+        MergedRegion(size_t start, size_t size) : start_offset(start), total_size(size) {}
+    };
+    
+    struct BatchWriteRequest {
+        std::vector<MergedRegion> merged_regions;
+        size_t total_write_size;
+        bool use_vectorized_io;
+        
+        BatchWriteRequest() : total_write_size(0), use_vectorized_io(true) {}
+    };
+    
+    // Region merging and batch optimization functions
+    std::vector<MergedRegion> merge_contiguous_regions(
+        const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions,
+        size_t merge_threshold = 4096);
+    
+    BatchWriteRequest optimize_batch_write(
+        const std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions);
     
     // Calculate optimal file size based on memory usage patterns
     size_t calculate_optimal_snapshot_size(size_t total_memory_tracked,
