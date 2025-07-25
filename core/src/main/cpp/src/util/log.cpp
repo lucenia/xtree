@@ -25,12 +25,7 @@ namespace xtree {
     ILogger iLogger;
     boost::mutex Logger::sm;
     FILE* Logger::logfile = nullptr;
-    thread_specific_ptr<Logger> Logger::tsp;
-    
-#ifdef _WIN32
-    // Explicit template instantiation for Windows DLL export
-    template class boost::thread_specific_ptr<Logger>;
-#endif
+    boost::thread_specific_ptr<Logger> Logger::tsp;
 
     const char* logLevelToString( LogLevel l ) {
         switch(l) {
@@ -67,7 +62,7 @@ namespace xtree {
 
         oss << msg;
 
-        boost::mutex::scoped_lock lk(sm);
+        std::lock_guard<boost::mutex> lk(sm);
         string out = oss.str();
 
         if( t ) t->write(logLevel,out);
@@ -89,7 +84,7 @@ namespace xtree {
     }
 
     void Logger::setLogFile( FILE* f ) {
-        boost::mutex::scoped_lock lk(sm);
+        std::lock_guard<boost::mutex> lk(sm);
         logfile = f;
     }
 }

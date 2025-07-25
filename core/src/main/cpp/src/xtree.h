@@ -410,11 +410,8 @@ namespace xtree {
         // completely purges this XTreeBucket, along w/ all children buckets and data
         void xt_purge(CacheNode* thisCacheNode);
 
-        /** @return the number of bytes required for the mbr */
-        unsigned short mbrBytes() { return this->_mbrBytes; }
 
         const unsigned short knSize() const {  return (sizeof(_MBRKeyNode)); }
-         //return (sizeof(bool) + sizeof(Record) + this->_mbrBytes); }
 
         // returns the number of children
         const int n() const { return _n; }
@@ -465,14 +462,6 @@ namespace xtree {
         XTreeBucket<Record>* nextChild() const { return _nextChild; }
         const vector<_MBRKeyNode*>* getChildren() { return &_children; }
 
-        // returns the size of the header
-        unsigned short _headerSize() const { return (sizeof(XTreeBucket) + this->_mbrBytes); }
-        // returns a pointer to the mbrData of *this* bucket 
-        char * mbrData() { return this->data + 1; /*sizeof(bool) + sizeof(unsigned short);*/ }
-        // returns a pointer to the data
-        char * dataAt(short ofs) { return mbrData() + this->_mbrBytes + ofs; }
-        // returns MBRKeyNode data as a char pointer
-        const char* k(int i) { return static_cast<XTreeBucket<Record> *>(this)->dataAt((i*(knSize()))); }
 
         // creates or updates a key node
         _MBRKeyNode* kn(CacheNode* record, int n=-1) {
@@ -526,10 +515,6 @@ namespace xtree {
             _memoryUsage += i*sizeof(_MBRKeyNode);
         }
 
-        KeyMBR kmbr(int i, unsigned short dimension, unsigned short bitsize) const {
-            /**@TODO check mbr types... should not need to reinterpret_cast here*/
-            return KeyMBR(dimension, bitsize, this->_mbrBytes, reinterpret_cast<const char*>(kn(i)->mbr));
-        }
 
         const bool isDataNode() const { return false; }
         const bool isLeaf() const { return this->_leaf; }

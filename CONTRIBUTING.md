@@ -27,27 +27,46 @@ sudo apt install build-essential cmake libboost-all-dev default-jdk
 
 **macOS (Homebrew):**
 ```bash
+# Install build tools and dependencies
 brew install cmake boost openjdk@21
+
+# Set JAVA_HOME if needed
+export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+
+# Note: Page size is 4KB on Intel Macs, 16KB on Apple Silicon (M1/M2)
+# The build automatically detects this at runtime
 ```
 
-**Windows:**
+**Windows (Visual Studio - Recommended):**
+```bash
+# Install Visual Studio 2022 with C++ workload
+# Install CMake from https://cmake.org/download/
+
+# Install vcpkg for C++ dependency management
+git clone https://github.com/Microsoft/vcpkg.git C:\vcpkg
+C:\vcpkg\bootstrap-vcpkg.bat
+C:\vcpkg\vcpkg integrate install
+
+# Install Boost libraries for MSVC
+C:\vcpkg\vcpkg install boost-system:x64-windows boost-filesystem:x64-windows boost-thread:x64-windows boost-iostreams:x64-windows
+
+# The build will automatically use vcpkg
+```
+
+**Windows (MinGW Alternative):**
 ```bash
 # Install dependencies with Chocolatey
 choco install cmake mingw
 
-# Install vcpkg for C++ dependency management
-git clone https://github.com/Microsoft/vcpkg.git C:/vcpkg
-C:/vcpkg/bootstrap-vcpkg.bat
+# Install Boost libraries for MinGW
+C:\vcpkg\vcpkg install boost-system:x64-mingw-static boost-filesystem:x64-mingw-static boost-thread:x64-mingw-static boost-iostreams:x64-mingw-static
 
-# Install Boost libraries
-C:/vcpkg/vcpkg.exe install boost-system boost-filesystem boost-thread boost-iostreams --triplet x64-mingw-static
-
-# Set environment variables (add to your system PATH)
-set BOOST_ROOT=C:/vcpkg/installed/x64-mingw-static
-set CMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake
+# Set environment variables
+set CMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake
+set CMAKE_GENERATOR=MinGW Makefiles
 ```
 
-Alternatively, you can use Visual Studio with MSVC, but MinGW is recommended for consistency with the CI builds.
+**Note:** The Windows build creates a static library to avoid DLL export/import complications. Boost libraries are linked statically on Windows.
 
 ### Building the Project
 
@@ -70,6 +89,23 @@ cd xtree
 - **Build and run tests:** `./gradlew build`
 - **Run tests only:** `./gradlew test`
 - **Clean build artifacts:** `./gradlew clean`
+
+### Platform-Specific Troubleshooting
+
+**Linux:**
+- If Boost is not found, ensure development packages are installed: `sudo apt install libboost-dev`
+- For older distributions, you may need to build Boost from source for C++17 compatibility
+
+**macOS:**
+- If you see "Rosetta 2" warnings on Apple Silicon, ensure you're using native ARM tools
+- Check architecture with: `arch` (should show `arm64` on Apple Silicon)
+- Force native build if needed: `arch -arm64 ./gradlew build`
+
+**Windows:**
+- If tests crash immediately, check that Boost is linked statically (MSVC default)
+- For "DLL not found" errors, ensure vcpkg libraries match your compiler (x64-windows for MSVC)
+- If Boost is not found, verify `vcpkg integrate install` was run
+- For manual Boost installations, set `BOOST_ROOT` environment variable
 
 ### Build Modes
 

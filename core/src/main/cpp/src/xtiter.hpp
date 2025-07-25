@@ -48,7 +48,7 @@ namespace xtree {
      */
     template< class RecordType >
     bool Iterator<RecordType>::contains(typename Iterator<RecordType>::CacheNode* nodeHandle, ...) {
-        cout << "calling contain search - not yet implemented" << endl;
+//        cout << "calling contain search - not yet implemented" << endl;
 
         // get the key for the host node
 //        KeyMBR* hostKey = nodeHandle->object->getKey();

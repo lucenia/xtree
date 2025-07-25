@@ -36,22 +36,24 @@ using namespace std::chrono;
 
 class PageWriteTrackerTest : public ::testing::Test {
 protected:
-    static const size_t TEST_PAGE_SIZE;
+    size_t GetTestPageSize() const {
+        return PageAlignedMemoryTracker::get_cached_page_size();
+    }
     
     void SetUp() override {
-        tracker = make_unique<PageWriteTracker>(PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE);
+        tracker = make_unique<PageWriteTracker>(GetTestPageSize());
     }
     
     unique_ptr<PageWriteTracker> tracker;
 };
 
-const size_t PageWriteTrackerTest::TEST_PAGE_SIZE = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
-
 // Test basic write tracking
 TEST_F(PageWriteTrackerTest, BasicWriteTracking) {
     // Use page-aligned addresses based on actual page size
-    void* page1 = reinterpret_cast<void*>(TEST_PAGE_SIZE);
-    void* page2 = reinterpret_cast<void*>(TEST_PAGE_SIZE * 2);
+    void* page1 = reinterpret_cast<void*>(GetTestPageSize());
+    void* page2 = reinterpret_cast<void*>(GetTestPageSize() * 2);
+    
+    // Test addresses are now correctly set
     
     // Track writes
     for (int i = 0; i < 5; i++) {
@@ -78,7 +80,7 @@ TEST_F(PageWriteTrackerTest, BasicWriteTracking) {
 TEST_F(PageWriteTrackerTest, HotPageDetection) {
     vector<void*> pages;
     for (int i = 0; i < 10; i++) {
-        pages.push_back(reinterpret_cast<void*>(TEST_PAGE_SIZE * (i + 1)));
+        pages.push_back(reinterpret_cast<void*>(GetTestPageSize() * (i + 1)));
     }
     
     
@@ -120,9 +122,9 @@ TEST_F(PageWriteTrackerTest, AccessTracking) {
 TEST_F(PageWriteTrackerTest, PageAlignment) {
     // All these addresses should map to the same page
     // Use addresses within the first page
-    void* addr1 = reinterpret_cast<void*>(TEST_PAGE_SIZE);
-    void* addr2 = reinterpret_cast<void*>(TEST_PAGE_SIZE + 0x100);
-    void* addr3 = reinterpret_cast<void*>(TEST_PAGE_SIZE + TEST_PAGE_SIZE - 1);
+    void* addr1 = reinterpret_cast<void*>(GetTestPageSize());
+    void* addr2 = reinterpret_cast<void*>(GetTestPageSize() + 0x100);
+    void* addr3 = reinterpret_cast<void*>(GetTestPageSize() + GetTestPageSize() - 1);
     
     tracker->record_write(addr1);
     tracker->record_write(addr2);
@@ -134,7 +136,7 @@ TEST_F(PageWriteTrackerTest, PageAlignment) {
 
 // Test batch update coordinator
 TEST(BatchUpdateCoordinatorTest, BasicBatching) {
-    BatchUpdateCoordinator<int> coordinator(PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE);
+    BatchUpdateCoordinator<int> coordinator(PageAlignedMemoryTracker::get_cached_page_size());
     
     vector<int> values(10, 0);
     
@@ -221,7 +223,7 @@ protected:
     }
 };
 
-const size_t COWPrefaultPerformanceTest::PAGE_SIZE = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+const size_t COWPrefaultPerformanceTest::PAGE_SIZE = PageAlignedMemoryTracker::get_cached_page_size();
 
 TEST_F(COWPrefaultPerformanceTest, PrefaultBenefit) {
     // Make some pages "hot" by writing to them frequently
@@ -304,8 +306,12 @@ TEST_F(COWPrefaultPerformanceTest, BatchUpdateBenefit) {
     // Both should be similar since they're on the same page, but batch concept is demonstrated
     // Very relaxed constraint for CI environments - just ensure neither takes unreasonably long
     // The real benefit of batching is reducing COW faults, not necessarily faster individual page writes
-    EXPECT_LT(individual_time.count(), 10000); // Individual updates should complete within 10ms
-    EXPECT_LT(batch_time.count(), 10000);      // Batch updates should complete within 10ms
+    // ARM processors and CI environments may have different performance characteristics
+    const long MAX_TIME_MICROS = 50000; // 50ms - more tolerant for ARM and CI
+    EXPECT_LT(individual_time.count(), MAX_TIME_MICROS) 
+        << "Individual updates took too long: " << individual_time.count() << " microseconds";
+    EXPECT_LT(batch_time.count(), MAX_TIME_MICROS) 
+        << "Batch updates took too long: " << batch_time.count() << " microseconds";
     
     // Optional: Only check relative performance if both timings are meaningful (> 1 microsecond)
     if (individual_time.count() > 1 && batch_time.count() > 1) {
@@ -324,7 +330,7 @@ TEST_F(COWPrefaultPerformanceTest, BatchUpdateBenefit) {
 // Test memory leak prevention in tracking system
 TEST(MemoryLeakTest, NoLeaksInTrackingSystem) {
     // Create and destroy multiple COW managers to test cleanup
-    const size_t page_size = PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE;
+    const size_t page_size = PageAlignedMemoryTracker::get_cached_page_size();
     
     for (int i = 0; i < 5; i++) {
         auto cow_manager = make_unique<DirectMemoryCOWManager<DataRecord>>(nullptr, "leak_test.snapshot");

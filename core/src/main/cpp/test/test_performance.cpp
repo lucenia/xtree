@@ -242,7 +242,7 @@ TEST_F(XTreePerformanceTest, SpatialQueries) {
     auto end = high_resolution_clock::now();
     auto duration = duration_cast<milliseconds>(end - start);
     
-    cout << "Spatial queries: " << NUM_QUERIES 
+    cout << "Range queries: " << NUM_QUERIES 
          << " queries in " << duration.count() << " milliseconds" 
          << " (" << (NUM_QUERIES * 1000.0 / duration.count()) << " queries/second)" << endl;
     cout << "Average results per query: " << (totalResults / (double)NUM_QUERIES) << endl;

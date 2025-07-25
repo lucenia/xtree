@@ -165,17 +165,18 @@ endif()
 # Find dependencies BEFORE processing sources
 # ==========================================
 
-# Platform-specific setup for finding dependencies
+# ==========================================
+# Platform-specific dependency configuration
+# ==========================================
 if(APPLE)
-    # macOS specific paths
-    # Check for Homebrew installations
+    # macOS: Check for Homebrew Boost installations
     if(EXISTS "/usr/local/opt/boost")
         set(BOOST_ROOT "/usr/local/opt/boost")
     elseif(EXISTS "/opt/homebrew/opt/boost")
         set(BOOST_ROOT "/opt/homebrew/opt/boost")
     endif()
     
-    # Set JAVA_HOME if not already set
+    # macOS: Set JAVA_HOME if not already set
     if(NOT DEFINED ENV{JAVA_HOME})
         execute_process(
             COMMAND /usr/libexec/java_home
@@ -187,19 +188,70 @@ if(APPLE)
             set(ENV{JAVA_HOME} "${JAVA_HOME_PATH}")
         endif()
     endif()
+    
 elseif(WIN32)
-    # Windows specific paths
-    # When using vcpkg, let the toolchain file handle everything
+    # ==========================================
+    # Windows-specific configuration (consolidated)
+    # ==========================================
+    
+    # 1. Detect vcpkg if not already using toolchain
     if(NOT CMAKE_TOOLCHAIN_FILE)
-        # Only set manual paths if not using vcpkg
+        # Check common vcpkg installation paths
+        if(EXISTS "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
+            set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
+            message(STATUS "Found vcpkg toolchain at C:/vcpkg")
+        elseif(EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+            set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
+            message(STATUS "Found vcpkg toolchain via VCPKG_ROOT")
+        endif()
+    endif()
+    
+    # 2. Configure vcpkg triplet if using vcpkg
+    if(CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg")
+        if(NOT VCPKG_TARGET_TRIPLET)
+            if(MINGW)
+                set(VCPKG_TARGET_TRIPLET "x64-mingw-static" CACHE STRING "")
+            else()
+                set(VCPKG_TARGET_TRIPLET "x64-windows" CACHE STRING "")
+            endif()
+        endif()
+        message(STATUS "Using vcpkg triplet: ${VCPKG_TARGET_TRIPLET}")
+    endif()
+    
+    # 3. Set up Boost paths
+    if(NOT CMAKE_TOOLCHAIN_FILE)
+        # Manual Boost configuration when not using vcpkg
         if(DEFINED ENV{BOOST_ROOT})
             set(BOOST_ROOT $ENV{BOOST_ROOT})
             set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} ${BOOST_ROOT})
         endif()
-        
-        # Add common Boost installation paths as fallback
+        # Add common installation paths as fallback
         set(CMAKE_PREFIX_PATH ${CMAKE_PREFIX_PATH} "C:/local/boost_1_88_0" "C:/boost")
+    elseif(EXISTS "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
+        # Using vcpkg - add its paths
+        list(APPEND CMAKE_PREFIX_PATH "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
+        set(BOOST_ROOT "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
     endif()
+    
+    # 4. Configure Boost library settings
+    if(MINGW)
+        set(Boost_USE_STATIC_LIBS ON)
+        set(Boost_USE_STATIC_RUNTIME OFF)
+    elseif(MSVC)
+        set(Boost_USE_STATIC_LIBS ON)
+        set(Boost_USE_STATIC_RUNTIME OFF)
+    else()
+        set(Boost_USE_STATIC_LIBS OFF)
+        set(Boost_USE_STATIC_RUNTIME OFF)
+    endif()
+    set(Boost_USE_MULTITHREADED ON)
+    
+    # 5. Debug output for Windows
+    message(STATUS "Windows configuration:")
+    message(STATUS "  CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
+    message(STATUS "  VCPKG_TARGET_TRIPLET: ${VCPKG_TARGET_TRIPLET}")
+    message(STATUS "  BOOST_ROOT: ${BOOST_ROOT}")
+    message(STATUS "  Boost_USE_STATIC_LIBS: ${Boost_USE_STATIC_LIBS}")
 endif()
 
 # JNI
@@ -207,21 +259,13 @@ find_package(Java REQUIRED)
 find_package(JNI REQUIRED)
 include_directories(${JNI_INCLUDE_DIRS})
 
-# Boost
-if(WIN32 AND MINGW)
-    # MinGW on Windows typically uses static libs from vcpkg
-    set(Boost_USE_STATIC_LIBS ON)
-    set(Boost_USE_STATIC_RUNTIME OFF)
-    
-    # When using vcpkg, ensure we use the correct triplet
-    if(CMAKE_TOOLCHAIN_FILE AND CMAKE_TOOLCHAIN_FILE MATCHES "vcpkg")
-        set(VCPKG_TARGET_TRIPLET "x64-mingw-static" CACHE STRING "")
-    endif()
-else()
+# Boost configuration (platform-specific settings already handled above)
+# Default settings for non-Windows platforms
+if(NOT WIN32)
     set(Boost_USE_STATIC_LIBS OFF)
     set(Boost_USE_STATIC_RUNTIME OFF)
+    set(Boost_USE_MULTITHREADED ON)
 endif()
-set(Boost_USE_MULTITHREADED ON)
 
 # For newer CMake versions, use the new FindBoost approach
 if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.30")
@@ -233,104 +277,41 @@ if(POLICY CMP0144)
     cmake_policy(SET CMP0144 NEW)
 endif()
 
-# Debug Boost search
-if(WIN32)
-    message(STATUS "Windows Boost search:")
-    message(STATUS "  BOOST_ROOT: ${BOOST_ROOT}")
-    message(STATUS "  BOOST_INCLUDEDIR: ${BOOST_INCLUDEDIR}")
-    message(STATUS "  CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH}")
-    message(STATUS "  CMAKE_TOOLCHAIN_FILE: ${CMAKE_TOOLCHAIN_FILE}")
-    message(STATUS "  VCPKG_TARGET_TRIPLET: ${VCPKG_TARGET_TRIPLET}")
-endif()
-
-# For Windows with vcpkg, configure Boost discovery settings
-if(WIN32 AND CMAKE_TOOLCHAIN_FILE)
-    message(STATUS "Using vcpkg toolchain for Boost discovery")
-endif()
-
-# Fallback: Try to find vcpkg installation on Windows if toolchain not set
-if(WIN32 AND NOT CMAKE_TOOLCHAIN_FILE)
-    # Check common vcpkg installation paths
-    if(EXISTS "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
-        set(CMAKE_TOOLCHAIN_FILE "C:/vcpkg/scripts/buildsystems/vcpkg.cmake")
-        message(STATUS "Found vcpkg toolchain at C:/vcpkg, using for Boost")
-        # Include the toolchain file to set up vcpkg paths
-        include("${CMAKE_TOOLCHAIN_FILE}")
-    elseif(EXISTS "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
-        set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake")
-        message(STATUS "Found vcpkg toolchain via VCPKG_ROOT, using for Boost")
-        # Include the toolchain file to set up vcpkg paths
-        include("${CMAKE_TOOLCHAIN_FILE}")
-    endif()
-endif()
-
-# Additional Windows-specific Boost hints
-if(WIN32)
-    # Check for vcpkg installation
-    if(EXISTS "C:/vcpkg/installed")
-        # Try to detect the vcpkg triplet
-        if(NOT VCPKG_TARGET_TRIPLET)
-            # Check for MinGW compiler
-            if(MINGW)
-                if(EXISTS "C:/vcpkg/installed/x64-mingw-dynamic")
-                    set(VCPKG_TARGET_TRIPLET "x64-mingw-dynamic")
-                elseif(EXISTS "C:/vcpkg/installed/x64-mingw-static")
-                    set(VCPKG_TARGET_TRIPLET "x64-mingw-static")
-                endif()
-            else()
-                # MSVC compiler
-                if(EXISTS "C:/vcpkg/installed/x64-windows")
-                    set(VCPKG_TARGET_TRIPLET "x64-windows")
-                endif()
-            endif()
-        endif()
-        
-        # Add vcpkg paths to CMAKE_PREFIX_PATH if triplet found
-        if(VCPKG_TARGET_TRIPLET)
-            list(APPEND CMAKE_PREFIX_PATH "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
-            set(BOOST_ROOT "C:/vcpkg/installed/${VCPKG_TARGET_TRIPLET}")
-            message(STATUS "Added vcpkg paths for triplet: ${VCPKG_TARGET_TRIPLET}")
-        endif()
-    endif()
-    
-    # Check environment variable first
-    if(NOT BOOST_ROOT AND DEFINED ENV{BOOST_ROOT})
-        set(BOOST_ROOT "$ENV{BOOST_ROOT}")
-        message(STATUS "Using BOOST_ROOT from environment: ${BOOST_ROOT}")
-    endif()
-    
-    # For MSVC, set up Boost library naming convention
-    if(MSVC)
-        set(Boost_USE_STATIC_LIBS ON)
-        set(Boost_USE_MULTITHREADED ON)
-        set(Boost_USE_STATIC_RUNTIME OFF)
-    endif()
-endif()
 
 # Try to find Boost with vcpkg first
+# First try modern CMake config approach
 find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
 
-# If not found and on Windows, try alternative approaches
+# Windows-specific: Try alternative Boost search methods if needed
 if(NOT Boost_FOUND AND WIN32)
-    message(STATUS "Boost not found via vcpkg, trying alternative paths...")
+    message(STATUS "Boost not found, trying fallback methods...")
     
-    # Try common Windows Boost locations
-    set(BOOST_SEARCH_PATHS
-        "C:/local/boost_1_88_0"
-        "C:/boost"
-        "C:/boost_1_88_0"
-        "$ENV{BOOST_ROOT}"
-        "$ENV{ProgramFiles}/boost"
-    )
+    # Try legacy FindBoost module
+    cmake_policy(SET CMP0167 OLD)
+    set(Boost_USE_STATIC_LIBS ${Boost_USE_STATIC_LIBS})
+    set(Boost_USE_MULTITHREADED ON)
+    set(Boost_USE_STATIC_RUNTIME OFF)
+    find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
     
-    foreach(search_path ${BOOST_SEARCH_PATHS})
-        if(EXISTS "${search_path}" AND NOT Boost_FOUND)
-            message(STATUS "Trying Boost at: ${search_path}")
-            set(BOOST_ROOT "${search_path}")
-            set(Boost_NO_SYSTEM_PATHS ON)
-            find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
-        endif()
-    endforeach()
+    # If still not found, try common Windows locations
+    if(NOT Boost_FOUND)
+        set(BOOST_SEARCH_PATHS
+            "C:/local/boost_1_88_0"
+            "C:/boost"
+            "C:/boost_1_88_0"
+            "$ENV{BOOST_ROOT}"
+            "$ENV{ProgramFiles}/boost"
+        )
+        
+        foreach(search_path ${BOOST_SEARCH_PATHS})
+            if(EXISTS "${search_path}" AND NOT Boost_FOUND)
+                message(STATUS "Trying Boost at: ${search_path}")
+                set(BOOST_ROOT "${search_path}")
+                set(Boost_NO_SYSTEM_PATHS ON)
+                find_package(Boost 1.58 COMPONENTS system filesystem thread iostreams)
+            endif()
+        endforeach()
+    endif()
 endif()
 
 # Final check - if still not found, it's required
@@ -346,9 +327,23 @@ if(Boost_FOUND)
     # Add Boost include directories BEFORE other includes to ensure they're found first
     include_directories(BEFORE ${Boost_INCLUDE_DIRS})
     
-    # Also add to compile definitions for better Windows support
+    # Windows-specific compile definitions
     if(WIN32)
-        add_compile_definitions(BOOST_ALL_NO_LIB)
+        add_compile_definitions(
+            # Boost configuration
+            BOOST_ALL_NO_LIB                    # Disable auto-linking
+            BOOST_DATE_TIME_NO_LIB              # Prevent date_time auto-link
+            BOOST_REGEX_NO_LIB                  # Prevent regex auto-link
+            BOOST_THREAD_DONT_USE_CHRONO        # Avoid xtime conflicts
+            BOOST_THREAD_VERSION=5              # Thread compatibility
+            BOOST_MPL_CFG_NO_PREPROCESSED_HEADERS  # MPL workaround
+            BOOST_MPL_LIMIT_STRING_SIZE=128     # MPL string size limit
+            
+            # Windows API configuration
+            WIN32_LEAN_AND_MEAN                 # Minimal Windows headers
+            NOMINMAX                            # Prevent min/max macros
+            _WIN32_WINNT=0x0601                 # Windows 7 minimum
+        )
     endif()
     
     link_directories(${Boost_LIBRARY_DIRS})
@@ -391,6 +386,7 @@ file(GLOB_RECURSE HEADER_FILES CONFIGURE_DEPENDS
 list(FILTER SRC_FILES EXCLUDE REGEX "test/.*")
 list(FILTER SRC_FILES EXCLUDE REGEX "test1.cpp")
 list(FILTER SRC_FILES EXCLUDE REGEX "examples/.*")
+list(FILTER SRC_FILES EXCLUDE REGEX "benchmarks/.*")
 
 # Add source group for IDEs
 source_group("Source Files" FILES ${SRC_FILES})
@@ -400,33 +396,31 @@ source_group("Header Files" FILES ${HEADER_FILES})
 file(GLOB TEST_SOURCES test/*.cpp)
 source_group("Tests" FILES ${TEST_SOURCES})
 
-# Shared library target
+# Library target configuration
 if(SRC_FILES)
-# On Windows, build static library to avoid DLL export issues
-# On other platforms, build shared library
-if(WIN32)
-    add_library(XTree STATIC ${SRC_FILES} ${HEADER_FILES})
-else()
-    add_library(XTree SHARED ${SRC_FILES} ${HEADER_FILES})
-endif()
-
-# No need for DLL export settings with static library on Windows
-
-if(DEFINED LIBRARY_OUTPUT_NAME AND DEFINED BASE_VERSION AND DEFINED VERSION_MAJOR)
+    # Windows: Static library to avoid DLL export complexity
+    # Other platforms: Shared library
     if(WIN32)
-        # On Windows, set both runtime and import library names
-        set_target_properties(XTree PROPERTIES
-            RUNTIME_OUTPUT_NAME ${LIBRARY_OUTPUT_NAME}
-            ARCHIVE_OUTPUT_NAME XTree  # Keep import library name simple
-        )
+        add_library(XTree STATIC ${SRC_FILES} ${HEADER_FILES})
     else()
-        set_target_properties(XTree PROPERTIES
-            OUTPUT_NAME ${LIBRARY_OUTPUT_NAME}
-            VERSION ${BASE_VERSION}
-            SOVERSION ${VERSION_MAJOR}
-        )
+        add_library(XTree SHARED ${SRC_FILES} ${HEADER_FILES})
     endif()
-endif()
+    
+    # Set library properties
+    if(DEFINED LIBRARY_OUTPUT_NAME AND DEFINED BASE_VERSION AND DEFINED VERSION_MAJOR)
+        if(WIN32)
+            set_target_properties(XTree PROPERTIES
+                RUNTIME_OUTPUT_NAME ${LIBRARY_OUTPUT_NAME}
+                ARCHIVE_OUTPUT_NAME XTree  # Simple import library name
+            )
+        else()
+            set_target_properties(XTree PROPERTIES
+                OUTPUT_NAME ${LIBRARY_OUTPUT_NAME}
+                VERSION ${BASE_VERSION}
+                SOVERSION ${VERSION_MAJOR}
+            )
+        endif()
+    endif()
 
 target_link_libraries(XTree
     ${Boost_LIBRARIES}
@@ -451,6 +445,9 @@ enable_testing()
 
 # Test target with Google Test
 set(GTEST_SOURCES
+    #test/test_minimal.cpp
+    #test/test_pagetracker_debug.cpp  # Debug version to isolate exact issue
+    test/test_page_write_tracker.cpp  # Re-enable now that static init is fixed
     test/test_globals.cpp
     test/test_xtree.cpp
     test/test_keymbr.cpp
@@ -460,15 +457,20 @@ set(GTEST_SOURCES
     test/test_float_utils.cpp
     test/test_performance.cpp
     test/test_cow_memory.cpp
-    test/test_page_write_tracker.cpp
     test/test_cow_integration.cpp
+    test/test_symbols.cpp
+)
+
+# Add benchmark sources (disabled by default)
+list(APPEND GTEST_SOURCES
+    benchmarks/performance_regression.cpp
 )
 
 add_executable(xtree_tests ${GTEST_SOURCES})
 
 target_link_libraries(xtree_tests 
-    XTree 
-    ${Boost_LIBRARIES}
+    XTree  # Add back for PageWriteTracker test
+    ${Boost_LIBRARIES}  # Re-enable Boost now that static init is fixed
     gtest
     gtest_main
     gmock
@@ -478,6 +480,25 @@ target_link_libraries(xtree_tests
 include(GoogleTest)
 # Disable test discovery during build to avoid segfaults
 # gtest_discover_tests(xtree_tests)
+
+# ==========================================
+# Platform-specific build notes
+# ==========================================
+if(WIN32)
+    if(NOT Boost_USE_STATIC_LIBS)
+        message(STATUS "")
+        message(STATUS "============================================================")
+        message(STATUS "Windows Dynamic Library Configuration:")
+        message(STATUS "To run tests, ensure Boost DLLs are in PATH.")
+        message(STATUS "Add your Boost library directory to system PATH:")
+        message(STATUS "  Example: C:/local/boost_1_88_0/stage/lib")
+        message(STATUS "Or set BOOST_ROOT environment variable.")
+        message(STATUS "============================================================")
+        message(STATUS "")
+    else()
+        message(STATUS "Using static Boost libraries - no DLL PATH configuration needed.")
+    endif()
+endif()
 
 # Install
 if(TARGET XTree)
