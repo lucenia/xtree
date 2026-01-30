@@ -250,7 +250,7 @@ protected:
         dimLabels->push_back("x");
         dimLabels->push_back("y");
         
-        idx = new IndexDetails<DataRecord>(2, 32, dimLabels, 1024*1024, nullptr, nullptr);
+        idx = new IndexDetails<DataRecord>(2, 32, dimLabels, nullptr, nullptr, "test_search");
         
         // Create root bucket
         root = new XTreeBucket<DataRecord>(idx, true, nullptr, nullptr, 0, true, 0);
@@ -327,12 +327,10 @@ TEST_F(TreeSearchTest, SearchBottomLeftQuadrant) {
     
     int count = 0;
     set<string> foundRows;
-    while (iter->hasNext()) {
-        DataRecord* result = iter->next();
-        if (result) {
-            count++;
-            foundRows.insert(result->getRowID());
-        }
+    std::string_view rid;
+    while (iter->nextRowID(rid)) {
+        count++;
+        foundRows.insert(std::string(rid));
     }
     
     EXPECT_GE(count, 1);  // Should find at least row1
@@ -369,9 +367,8 @@ TEST_F(TreeSearchTest, SearchAllRecords) {
     auto iter = root->getIterator(cachedRoot, searchRecord, INTERSECTS);
     
     int count = 0;
-    while (iter->hasNext()) {
-        DataRecord* result = iter->next();
-        if (result) count++;
+    while (iter->nextData()) {
+        count++;
     }
     
     EXPECT_EQ(count, testData.size());  // Should find all records
@@ -406,9 +403,8 @@ TEST_F(TreeSearchTest, SearchNoRecords) {
     auto iter = root->getIterator(cachedRoot, searchRecord, INTERSECTS);
     
     int count = 0;
-    while (iter->hasNext()) {
-        DataRecord* result = iter->next();
-        if (result) count++;
+    while (iter->nextData()) {
+        count++;
     }
     
     EXPECT_EQ(count, 0);  // Should find no records

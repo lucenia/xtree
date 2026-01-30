@@ -61,8 +61,8 @@ namespace xtree {
         
         // Unroll common 2D case
         if (dimension == 2) {
-            int32_t x = floatToSortableInt((float)data[0]);
-            int32_t y = floatToSortableInt((float)data[1]);
+            float x = (float)data[0];
+            float y = (float)data[1];
             this->_box[0] = MIN(this->_box[0], x);
             this->_box[1] = MAX(this->_box[1], x);
             this->_box[2] = MIN(this->_box[2], y);
@@ -70,10 +70,10 @@ namespace xtree {
         } else {
             // General case
             for(unsigned short d=0; d<dimension; d++) {
-                int32_t sortableValue = floatToSortableInt((float)data[d]);
+                float value = (float)data[d];
                 unsigned short idx = d*2;
-                this->_box[idx] = MIN(this->_box[idx], sortableValue);
-                this->_box[idx+1] = MAX(this->_box[idx+1], sortableValue);
+                this->_box[idx] = MIN(this->_box[idx], value);
+                this->_box[idx+1] = MAX(this->_box[idx+1], value);
             }
         }
         // Clear cached area
@@ -87,6 +87,12 @@ namespace xtree {
      * Expands this MBR given a child MBR (leaf or internal node)
      */
     void KeyMBR::expand(const KeyMBR &mbr) {
+        // Validate this MBR's state before expanding
+        if (!_box) {
+            trace() << "[EXPAND_ERROR] _box is null!" << std::endl;
+            return;
+        }
+
         // Unroll common 2D case
         if (dimension == 2) {
             // Direct memory access for performance
@@ -101,10 +107,18 @@ namespace xtree {
                 this->_box[d+1] = MAX(this->_box[d+1], mbr._box[d+1]);
             }
         }
-        // Clear cached area
+        // Clear cached area - validate pointer is a valid heap address
         if(_area) {
-            delete _area;
-            _area = NULL;
+            // Check if _area looks like a valid heap pointer (not a small value like 0x3)
+            uintptr_t area_val = reinterpret_cast<uintptr_t>(_area);
+            if (area_val < 0x1000) {
+                trace() << "[EXPAND_ERROR] _area has invalid value 0x" << std::hex << area_val
+                          << std::dec << " - NOT deleting (likely memory corruption)" << std::endl;
+                _area = NULL;  // Clear without delete to avoid crash
+            } else {
+                delete _area;
+                _area = NULL;
+            }
         }
     }
 
@@ -254,11 +268,10 @@ namespace xtree {
     double KeyMBR::overlap(const KeyMBR& bb) const {
         double area = -1.0;
         for( unsigned short d=0; d<dimension*2; d+=2 ) {
-            // Convert back to float for area calculation
-            float thisMin = sortableIntToFloat(this->_box[d]);
-            float thisMax = sortableIntToFloat(this->_box[d+1]);
-            float bbMin = bb.getMin(d/2);
-            float bbMax = bb.getMax(d/2);
+            float thisMin = this->_box[d];
+            float thisMax = this->_box[d+1];
+            float bbMin = bb._box[d];
+            float bbMax = bb._box[d+1];
             area = abs(area)*MAX(0.0f, (MIN(thisMax, bbMax) - MAX(thisMin, bbMin)));
         }
         if(area < 0) area=0.0;
@@ -298,6 +311,31 @@ namespace xtree {
     }
 
     /**
+     * Check if this MBR completely contains another MBR.
+     * Returns true if all bounds of bb are within this MBR's bounds.
+     */
+    bool KeyMBR::contains(const KeyMBR& bb) const {
+        // Optimize for common 2D case
+        if (dimension == 2) {
+            // bb must be completely within this MBR
+            return (this->_box[0] <= bb._box[0] &&   // this.minX <= bb.minX
+                    this->_box[1] >= bb._box[1] &&   // this.maxX >= bb.maxX
+                    this->_box[2] <= bb._box[2] &&   // this.minY <= bb.minY
+                    this->_box[3] >= bb._box[3]);    // this.maxY >= bb.maxY
+        }
+        
+        // General n-dimensional case
+        for (unsigned short d = 0; d < dimension * 2; d += 2) {
+            // Check if bb's bounds are within this MBR's bounds
+            if (this->_box[d] > bb._box[d] ||        // this.min > bb.min
+                this->_box[d+1] < bb._box[d+1]) {    // this.max < bb.max
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Calculate the area the keynode will need to be enlarged
      * to accomodate the provided key.
      */
@@ -312,8 +350,8 @@ namespace xtree {
             if(areaOrig == 0)
                 break;
             else {
-                m = MIN(this->_box[d], key.getBoxVal(d));
-                M = MAX(this->_box[d+1], key.getBoxVal(d+1));
+                m = MIN(this->_box[d], key._box[d]);
+                M = MAX(this->_box[d+1], key._box[d+1]);
                 areaNew = abs(areaNew*abs(M-m));
             }
         }

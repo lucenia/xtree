@@ -25,20 +25,33 @@ namespace xtree {
     ILogger iLogger;
     boost::mutex Logger::sm;
     FILE* Logger::logfile = nullptr;
-    thread_specific_ptr<Logger> Logger::tsp;
+    boost::thread_specific_ptr<Logger> Logger::tsp;
     
-#ifdef _WIN32
-    // Explicit template instantiation for Windows DLL export
-    template class boost::thread_specific_ptr<Logger>;
-#endif
+    // Global log level (defaults to WARNING for production performance)
+    // Only WARNING, ERROR, and SEVERE messages are logged by default
+    // Set LOG_LEVEL=INFO or LOG_LEVEL=DEBUG for more verbose output
+    std::atomic<int> logLevel{LOG_WARNING};
+    int tlogLevel = LOG_WARNING;
+    const char * (*getcurns)() = []() -> const char* { return "xtree"; };
+    
+    // Static initializer to set log level from environment
+    struct LogInitializer {
+        LogInitializer() {
+            initLoggingFromEnv();
+        }
+    };
+    static LogInitializer log_init;
 
     const char* logLevelToString( LogLevel l ) {
         switch(l) {
+        case LOG_TRACE:
+            return "TRACE";
         case LOG_DEBUG:
+            return "DEBUG";
         case LOG_INFO:
-            return "";
+            return "INFO";
         case LOG_WARNING:
-            return "warning";
+            return "WARN";
         case LOG_ERROR:
             return "ERROR";
         case LOG_SEVERE:
@@ -57,28 +70,34 @@ namespace xtree {
         oss << time_t_to_String();
         oss << " [" << getThreadName() << "] ";
 
+        // Always show log level
+        oss << "[" << type << "] ";
+        
         for ( int i=0; i<indent; i++ )
             oss << '\t';
 
-        if ( type[0] ) {
-            oss << type;
-            oss << ": ";
-        }
+        oss << msg << '\n';  // Add newline for auto-flushed messages
 
-        oss << msg;
-
-        boost::mutex::scoped_lock lk(sm);
+        std::lock_guard<boost::mutex> lk(sm);
         string out = oss.str();
 
         if( t ) t->write(logLevel,out);
 
         if (logfile) {
-            if(fprintf(logfile, "%s", oss.str().c_str())>=0) {
-                fflush(logfile);
-            }
-            else {
-                int x = errno;
-                cerr << "Failed to write to logfile: " << errnoWithDescription(x) << ": " << out << endl;
+            // Check if logfile is actually stderr
+            if (logfile == stderr) {
+                // It's stderr, just write to it
+                fprintf(stderr, "%s", oss.str().c_str());
+                fflush(stderr);
+            } else {
+                // Write ONLY to the log file when it's set
+                if(fprintf(logfile, "%s", oss.str().c_str())>=0) {
+                    fflush(logfile);
+                }
+                else {
+                    int x = errno;
+                    cerr << "Failed to write to logfile: " << errnoWithDescription(x) << ": " << out << endl;
+                }
             }
         } else {
             // If no logfile is set, output to stderr
@@ -89,7 +108,7 @@ namespace xtree {
     }
 
     void Logger::setLogFile( FILE* f ) {
-        boost::mutex::scoped_lock lk(sm);
+        std::lock_guard<boost::mutex> lk(sm);
         logfile = f;
     }
 }

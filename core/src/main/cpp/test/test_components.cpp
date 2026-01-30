@@ -124,7 +124,7 @@ TEST_F(IndexDetailsTest, Creation) {
     dimLabels->push_back("y");
     dimLabels->push_back("z");
     
-    IndexDetails<DataRecord> idx(3, 32, dimLabels, 1024*1024, nullptr, nullptr);
+    IndexDetails<DataRecord> idx(3, 32, dimLabels, nullptr, nullptr, "test_creation");
     
     EXPECT_EQ(idx.getDimensionCount(), 3);
     EXPECT_EQ(idx.getPrecision(), 32);
@@ -138,7 +138,7 @@ TEST_F(IndexDetailsTest, NodeIDGeneration) {
     dimLabels->push_back("x");
     dimLabels->push_back("y");
     
-    IndexDetails<DataRecord> idx(2, 32, dimLabels, 1024*1024, nullptr, nullptr);
+    IndexDetails<DataRecord> idx(2, 32, dimLabels, nullptr, nullptr, "test_nodeid");
     
     UniqueId id1 = idx.getNextNodeID();
     UniqueId id2 = idx.getNextNodeID();
@@ -159,7 +159,7 @@ protected:
         dimLabels->push_back("x");
         dimLabels->push_back("y");
         
-        idx = new IndexDetails<DataRecord>(2, 32, dimLabels, 1024*1024, nullptr, nullptr);
+        idx = new IndexDetails<DataRecord>(2, 32, dimLabels, nullptr, nullptr, "test_root");
     }
     
     void TearDown() override {
@@ -207,13 +207,7 @@ TEST(MBRKeyNodeTest, LeafStatus) {
     EXPECT_TRUE(node.getLeaf());
 }
 
-TEST(MBRKeyNodeTest, CachedStatus) {
-    typedef __MBRKeyNode<DataRecord> MBRKeyNode;
-    
-    MBRKeyNode node;
-    node.setCached(true);
-    EXPECT_TRUE(node.getCached());
-}
+// setCached is deprecated - test removed
 
 // Sorting Functor Tests
 class SortingFunctorTest : public ::testing::Test {
@@ -265,7 +259,7 @@ TEST_F(SortingFunctorTest, SortByRangeMax) {
 TEST(XTreeBucketDestructorTest, CleansUpParentNodeMemory) {
     // Create a simple index
     vector<const char*> dimLabels = {"x", "y", "z"};
-    IndexDetails<DataRecord> idx(3, 32, &dimLabels, 1024*1024, nullptr, nullptr);
+    IndexDetails<DataRecord> idx(3, 32, &dimLabels, nullptr, nullptr, "test_cleanup");
     
     // Create multiple buckets to test destructor
     XTreeBucket<DataRecord>* bucket1 = new XTreeBucket<DataRecord>(&idx, true);

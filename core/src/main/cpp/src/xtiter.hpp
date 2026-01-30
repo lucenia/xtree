@@ -29,13 +29,24 @@ namespace xtree {
     bool Iterator<RecordType>::intersects(typename Iterator<RecordType>::CacheNode* nodeHandle, ...) {
         // get the key for the host node
         KeyMBR* hostKey = nodeHandle->object->getKey();
+        
+        if (!hostKey) {
+            return false;
+        }
+        if (!_searchKey || !_searchKey->getKey()) {
+            return false;
+        }
 
         // determine if the host key intersects the search key
         bool ret = hostKey->intersects(*(_searchKey->getKey()));
 
-        // if this is a data node we add it to the resulting record vector
-        if(ret && nodeHandle->object->isDataNode())
-            _recordQueue.push_back(nodeHandle);
+        // if this is a data node we add it to the resulting record queue
+        if(ret && nodeHandle->object->isDataNode()) {
+            // The nodeHandle contains the resolved DataRecord already
+            // No _MBRKeyNode needed since this is the actual data
+            QueueItem item{nodeHandle, nullptr};
+            _recordQueue.push_back(item);
+        }
 
         return ret;
     }
@@ -48,7 +59,7 @@ namespace xtree {
      */
     template< class RecordType >
     bool Iterator<RecordType>::contains(typename Iterator<RecordType>::CacheNode* nodeHandle, ...) {
-        cout << "calling contain search - not yet implemented" << endl;
+//        cout << "calling contain search - not yet implemented" << endl;
 
         // get the key for the host node
 //        KeyMBR* hostKey = nodeHandle->object->getKey();
@@ -62,57 +73,109 @@ namespace xtree {
     /**
      * Traversal framework method
      *
-     *  There is a memory trade off in this design that needs to be (re-)considered.  This implementation
-     *  is designed such that 'traverse' is a generic method for handling breadth-first/depth-first tree
-     *  traversal.  In this manner, we can implement other XTree processing algorithms without having
-     *  to separately carry all of the bookeeping for both breadth and depth first traversal.  The
-     *  trade-off for compact code, however, is that the _traversalOrder container could get quite
-     *  large and consume significant memory.  The fact that XTree is a wide (vice deep) tree structure
-     *  exacerbates this problem and potentially warrants the need for a recursive depth-first traversal
-     *  implementation.  Since we don't expect a deep tree structure we shouldn't expect stackOverflow
-     *  issues.  Further benchmarking to determine if this is a problem is left as a todo
+     * Internal nodes are cached and traversed normally.
+     * Data records are never materialized here - we use their MBR for filtering
+     * and defer loading to next() for zero heap retention during traversal.
      */
     template< class RecordType >
     template< typename TraversalOrder >
     void Iterator<RecordType>::traverse(typename Iterator<RecordType>::CacheNode* nodeHandle,
                                         bool(xtree::Iterator<RecordType>::* visit)(
                                         typename Iterator<RecordType>::CacheNode*, ...) ) {
-        // breadth first or depth first order
-        // we hold on to the state of the traversal using
-        // the _traversalOrder member (which resolves to a stack or
-        // queue based on the template parameter)
+        // Init/restore traversal order (stack or queue)
         TraversalOrder *sq;
         if(_traversalOrder == NULL) {
             sq = new TraversalOrder();
             _traversalOrder = static_cast<void*>(sq);
-            // pushes the starting node onto the stack/queue
-            sq->push(nodeHandle);
+            
+            if (nodeHandle && nodeHandle->object) {
+                sq->push(nodeHandle);
+            } else {
+                // Root should always be cached; bail safely if not
+                _hasNext = false;
+                delete sq;
+                _traversalOrder = NULL;
+                return;
+            }
         } else {
             sq = static_cast<TraversalOrder*>(_traversalOrder);
         }
 
-        IRecord* rec = NULL;
-        int n;
-        // while the stack/queue is not empty continue to traverse
+        // MBR-based predicate for data children (avoids materialization)
+        const auto mbr_matches = [this](MBRKeyNode* kn) -> bool {
+            const KeyMBR* childKey = kn ? kn->getKey() : nullptr;
+            if (!childKey || !_searchKey || !_searchKey->getKey()) {
+                return false;
+            }
+            
+            switch (_searchType) {
+                case INTERSECTS:
+                    return childKey->intersects(*(_searchKey->getKey()));
+                case WITHIN:
+                    // For CONTAINS, the search key should contain the child
+                    return _searchKey->getKey()->contains(*childKey);
+                case CONTAINS:
+                    // For CONTAINS, the child should contain the search key
+                    return childKey->contains(*(_searchKey->getKey()));
+                default:
+                    return true;
+            }
+        };
+
+        // Walk until we've filled a page of results or traversal is empty
         while(!sq->empty() && _recordQueue.size()<XTREE_ITER_PAGE_SIZE) {
-            rec = top(*sq)->object;
-            // proceed deeper/wider? in the traversal
-            // this is determined by the visit function referenced by the function pointer
-            bool proceed = (this->* visit)(pull(*sq));
-            if( proceed ) {
-                // add children if we're not at a data node
-                if(rec->isDataNode() == false) {
-                    n=0;
-                    XTreeBucket<RecordType>* bucket = reinterpret_cast<XTreeBucket<RecordType>*>(rec);
-                    for(typename vector<MBRKeyNode*>::const_iterator iter = bucket->getChildren()->begin();
-                        n<bucket->n(); iter++, ++n
+            CacheNode* cur = top(*sq);
+            
+            // Safety: internal nodes must have materialized objects
+            if (cur && cur->object && !cur->object->isDataNode()) {
+                bool proceed = (this->* visit)(pull(*sq));  // visit internal bucket
+                
+                if( proceed ) {
+                    // Expand children
+                    XTreeBucket<RecordType>* bucket = reinterpret_cast<XTreeBucket<RecordType>*>(cur->object);
+                    auto* children = bucket ? bucket->getChildren() : nullptr;
+                    if (!children) continue;
+                    
+                    int n = 0;
+                    for(typename vector<MBRKeyNode*>::const_iterator iter = children->begin();
+                        n<bucket->n() && iter != children->end(); iter++, ++n
                     ) {
-                        CacheNode* childNode = (*iter)->getCacheRecord();
-                        if(childNode != NULL) {
-                            sq->push(childNode);
+                        MBRKeyNode* kn = *iter;
+                        if (!kn) continue;
+                        
+                        // Internal child: use cache_or_load for unified lazy loading
+                        if (!kn->isDataRecord()) {
+                            // Production path: cache_or_load handles both cached and persistent nodes
+                            CacheNode* childCN = kn->template cache_or_load<RecordType>(_idx);
+                            if (childCN) {
+                                sq->push(childCN);
+                            }
+#ifndef NDEBUG
+                            else if (kn->hasNodeID()) {
+                                // Development builds: warn if we have a valid NodeID but couldn't load
+                                log() << "WARN: Iterator skipping unloadable child bucket NodeID " 
+                                      << kn->getNodeID().raw() << std::endl;
+                            }
+#endif
+                            continue;
+                        }
+                        
+                        // Data child: do NOT materialize. Use MBR filter then enqueue resolver.
+                        if (mbr_matches(kn)) {
+                            _recordQueue.push_back(QueueItem{nullptr, kn});
+#ifndef NDEBUG
+                            // Debug: verify DataRecord has valid NodeID
+                            if (!kn->hasNodeID() || !kn->getNodeID().valid()) {
+                                trace() << "[ITER_WARN] DataRecord child missing NodeID in bucket "
+                                          << (bucket ? bucket->getNodeID().raw() : 0) << std::endl;
+                            }
+#endif
                         }
                     }
                 }
+            } else {
+                // Unexpected null object in traversal order - pop and continue
+                pull(*sq);
             }
         }
         _hasNext = (sq->size()>0);

@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <array>
 #include <thread>
+#include <chrono>
 
 #ifdef __linux__
 #include <sys/mman.h>
@@ -202,7 +203,7 @@ private:
         
         PageStats* find(void* page) {
             for (auto& entry : entries) {
-                if (entry.page == page) {
+                if (entry.page == page && entry.stats != nullptr) {
                     entry.access_count++;
                     return entry.stats;
                 }
@@ -230,6 +231,7 @@ private:
     
     const size_t page_size_;
     const uint32_t hot_write_threshold_;
+    const size_t page_shift_bits_;  // Cached bit shift value for page size
     
     // Batched timestamp updates
     std::atomic<uint64_t> current_epoch_{0};
@@ -251,41 +253,45 @@ private:
     size_t hash_page(void* page) const {
         // Fast hash function for aligned addresses
         uintptr_t addr = reinterpret_cast<uintptr_t>(page);
-        addr >>= 12; // Remove page offset bits
+        addr >>= page_shift_bits_; // Remove page offset bits using cached value
         return (addr * 2654435761ULL) & (HASH_TABLE_SIZE - 1);
     }
     
     PageStats* find_or_create_stats(void* page) {
         size_t bucket = hash_page(page);
         
-        // Debug logging
-        // if (reinterpret_cast<uintptr_t>(page) == 0x1000) {
-        //     std::cout << "[DEBUG] find_or_create_stats: page=0x1000, bucket=" << bucket 
-        //               << ", hash_table_[bucket]=" << hash_table_[bucket].load() << std::endl;
-        // }
-        
-        // Try to find existing entry
+        // Try to find existing entry first
         HashEntry* current = hash_table_[bucket].load(std::memory_order_acquire);
-        HashEntry* prev = nullptr;
-        
         while (current) {
-            void* entry_page = current->page.load(std::memory_order_relaxed);
+            void* entry_page = current->page.load(std::memory_order_acquire);
             if (entry_page == page) {
                 return &current->stats;
+            }
+            current = current->next.load(std::memory_order_acquire);
+        }
+        
+        // Now try to create new entry
+        HashEntry* new_current = hash_table_[bucket].load(std::memory_order_acquire);
+        HashEntry* prev = nullptr;
+        
+        while (new_current) {
+            void* entry_page = new_current->page.load(std::memory_order_acquire);
+            if (entry_page == page) {
+                return &new_current->stats;
             }
             if (entry_page == nullptr) {
                 // Try to claim this entry
                 void* expected = nullptr;
-                if (current->page.compare_exchange_strong(expected, page,
-                                                         std::memory_order_release,
-                                                         std::memory_order_relaxed)) {
+                if (new_current->page.compare_exchange_strong(expected, page,
+                                                         std::memory_order_acq_rel,
+                                                         std::memory_order_acquire)) {
                     // Reset stats for reused entry
-                    current->stats = PageStats{};
-                    return &current->stats;
+                    new_current->stats = PageStats{};
+                    return &new_current->stats;
                 }
             }
-            prev = current;
-            current = current->next.load(std::memory_order_acquire);
+            prev = new_current;
+            new_current = new_current->next.load(std::memory_order_acquire);
         }
         
         // Need to allocate new entry
@@ -332,6 +338,16 @@ private:
         return &new_entry->stats;
     }
     
+    static size_t calculate_page_shift(size_t page_size) {
+        size_t bits = 0;
+        size_t temp = page_size;
+        while (temp > 1) {
+            temp >>= 1;
+            bits++;
+        }
+        return bits;
+    }
+    
     void start_epoch_timer() {
         bool expected = false;
         if (!timer_running_.compare_exchange_strong(expected, true,
@@ -349,18 +365,37 @@ private:
     
 public:
     explicit PageWriteTracker(size_t page_size = 4096, uint32_t hot_threshold = 10) 
-        : page_size_(page_size), hot_write_threshold_(hot_threshold) {
+        : page_size_(page_size), 
+          hot_write_threshold_(hot_threshold),
+          page_shift_bits_(calculate_page_shift(page_size)) {
         // Initialize hash table
         for (auto& bucket : hash_table_) {
             bucket.store(nullptr, std::memory_order_relaxed);
         }
         
-        // Start epoch timer
-        start_epoch_timer();
+        // Don't start epoch timer here - will be started lazily on first write
     }
     
     ~PageWriteTracker() {
         // Clear thread-local cache to prevent dangling pointers
+        // On Windows, accessing thread_local during static destruction can cause deadlocks
+        // so we make this conditional and safe
+#ifdef _WIN32
+        // On Windows, only clear TLS if we're not in static destruction phase
+        // During static destruction, TLS may not be accessible safely
+        try {
+            auto& tl_cache = get_tl_cache();
+            for (auto& entry : tl_cache.entries) {
+                entry.page = nullptr;
+                entry.stats = nullptr;
+                entry.access_count = 0;
+            }
+            tl_cache.next_slot = 0;
+        } catch (...) {
+            // Ignore TLS access failures during Windows static destruction
+        }
+#else
+        // On Unix/macOS, TLS cleanup is safer during destruction
         auto& tl_cache = get_tl_cache();
         for (auto& entry : tl_cache.entries) {
             entry.page = nullptr;
@@ -368,6 +403,7 @@ public:
             entry.access_count = 0;
         }
         tl_cache.next_slot = 0;
+#endif
         
         // Stop epoch timer
         timer_running_.store(false, std::memory_order_release);
@@ -398,21 +434,39 @@ public:
     void record_write(void* ptr) {
         void* page = get_page_base(ptr);
         
-        // if (reinterpret_cast<uintptr_t>(page) == 0x1000) {
-        //     std::cout << "[DEBUG] record_write: ptr=" << ptr << ", page=" << page << std::endl;
-        // }
+        // Lazy timer initialization - zero overhead after first call
+        static std::once_flag timer_initialized;
+        std::call_once(timer_initialized, [this]() {
+            start_epoch_timer();
+        });
         
-        // Check thread-local cache first
+        // Check thread-local cache first - with Windows safety
+#ifdef _WIN32
+        try {
+            auto& tl_cache = get_tl_cache();
+            PageStats* stats = tl_cache.find(page);
+            if (!stats) {
+                stats = find_or_create_stats(page);
+                tl_cache.insert(page, stats);
+            }
+            stats->increment_writes(hot_write_threshold_);
+            stats->update_timestamp(current_epoch_.load(std::memory_order_relaxed));
+        } catch (...) {
+            // Fallback to direct lookup without cache on Windows TLS issues
+            PageStats* stats = find_or_create_stats(page);
+            stats->increment_writes(hot_write_threshold_);
+            stats->update_timestamp(current_epoch_.load(std::memory_order_relaxed));
+        }
+#else
         auto& tl_cache = get_tl_cache();
         PageStats* stats = tl_cache.find(page);
         if (!stats) {
             stats = find_or_create_stats(page);
             tl_cache.insert(page, stats);
         }
-        
-        // Lock-free updates
         stats->increment_writes(hot_write_threshold_);
         stats->update_timestamp(current_epoch_.load(std::memory_order_relaxed));
+#endif
     }
     
     void record_access(void* ptr) {
@@ -422,15 +476,30 @@ public:
         //     std::cout << "[DEBUG] record_access: ptr=" << ptr << ", page=" << page << std::endl;
         // }
         
-        // Check thread-local cache first
+        // Check thread-local cache first - with Windows safety
+#ifdef _WIN32
+        try {
+            auto& tl_cache = get_tl_cache();
+            PageStats* stats = tl_cache.find(page);
+            if (!stats) {
+                stats = find_or_create_stats(page);
+                tl_cache.insert(page, stats);
+            }
+            stats->increment_access();
+        } catch (...) {
+            // Fallback to direct lookup without cache on Windows TLS issues
+            PageStats* stats = find_or_create_stats(page);
+            stats->increment_access();
+        }
+#else
         auto& tl_cache = get_tl_cache();
         PageStats* stats = tl_cache.find(page);
         if (!stats) {
             stats = find_or_create_stats(page);
             tl_cache.insert(page, stats);
         }
-        
         stats->increment_access();
+#endif
     }
     
     std::vector<void*> get_hot_pages() const {

@@ -24,7 +24,7 @@
 #include <random>
 #include <chrono>
 #include "../src/keymbr.h"
-#include "../src/util.h"
+#include "../src/util/util.h"
 
 using namespace xtree;
 using namespace std;

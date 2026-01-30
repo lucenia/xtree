@@ -21,7 +21,7 @@
 
 namespace xtree {
 
-// Initialize page size at runtime (definition must be in a single translation unit)
-const size_t PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE = PageAlignedMemoryTracker::get_page_size();
+// RUNTIME_PAGE_SIZE is now implemented as a zero-overhead lazy initialization function
+// No static initialization needed - this avoids Windows hanging issues
 
 } // namespace xtree

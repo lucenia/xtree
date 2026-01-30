@@ -52,6 +52,8 @@
 #include <unistd.h>
 #endif
 
+// #include "cow_mmap_manager.hpp" // Removed - COWMMapManager functionality moved to Arena
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX  // Prevent Windows from defining min/max macros
@@ -99,8 +101,11 @@ public:
 #endif
     }
     
-    // Page size determined at runtime
-    static const size_t RUNTIME_PAGE_SIZE;
+    // Zero-overhead cached page size for all use cases
+    static const size_t& get_cached_page_size() {
+        static const size_t cached_size = get_page_size();
+        return cached_size;
+    }
     
     // Use unordered_map for O(1) lookups by address
     std::unordered_map<void*, MemoryRegion> tracked_regions_;
@@ -119,7 +124,7 @@ private:
 
 public:
     PageAlignedMemoryTracker() 
-        : write_tracker_(std::make_unique<PageWriteTracker>(RUNTIME_PAGE_SIZE)) {}
+        : write_tracker_(std::make_unique<PageWriteTracker>(get_cached_page_size())) {}
     
     ~PageAlignedMemoryTracker() {
         // Disable COW protection on all regions before destruction
@@ -139,9 +144,10 @@ public:
         
         // Align to page boundaries
         uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
-        uintptr_t aligned_start = start & ~(RUNTIME_PAGE_SIZE - 1);  // Round down
+        const size_t page_size = get_cached_page_size();
+        uintptr_t aligned_start = start & ~(page_size - 1);  // Round down
         uintptr_t end = start + size;
-        uintptr_t aligned_end = (end + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);  // Round up
+        uintptr_t aligned_end = (end + page_size - 1) & ~(page_size - 1);  // Round up
         
         MemoryRegion region{};
         region.start_addr = reinterpret_cast<void*>(aligned_start);
@@ -171,12 +177,13 @@ public:
     void batch_register_commit() {
         std::unique_lock<std::shared_mutex> lock(regions_lock_);
         
+        const size_t page_size = get_cached_page_size();
         for (const auto& [ptr, size] : batch_registration_.pending_regions) {
             // Align to page boundaries
             uintptr_t start = reinterpret_cast<uintptr_t>(ptr);
-            uintptr_t aligned_start = start & ~(RUNTIME_PAGE_SIZE - 1);
+            uintptr_t aligned_start = start & ~(page_size - 1);
             uintptr_t end = start + size;
-            uintptr_t aligned_end = (end + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);
+            uintptr_t aligned_end = (end + page_size - 1) & ~(page_size - 1);
             
             MemoryRegion region{};
             region.start_addr = reinterpret_cast<void*>(aligned_start);
@@ -246,7 +253,7 @@ public:
         
         // Align the pointer to find the key
         uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-        uintptr_t aligned_addr = addr & ~(RUNTIME_PAGE_SIZE - 1);
+        uintptr_t aligned_addr = addr & ~(get_cached_page_size() - 1);
         void* key = reinterpret_cast<void*>(aligned_addr);
         
         auto it = tracked_regions_.find(key);
@@ -283,10 +290,11 @@ public:
     void batch_unregister_commit() {
         std::unique_lock<std::shared_mutex> lock(regions_lock_);
         
+        const size_t page_size = get_cached_page_size();
         for (const auto& [ptr, _] : batch_registration_.pending_regions) {
             // Align the pointer to find the key
             uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
-            uintptr_t aligned_addr = addr & ~(RUNTIME_PAGE_SIZE - 1);
+            uintptr_t aligned_addr = addr & ~(page_size - 1);
             void* key = reinterpret_cast<void*>(aligned_addr);
             
             auto it = tracked_regions_.find(key);
@@ -332,13 +340,37 @@ public:
         return write_tracker_.get();
     }
     
-    // Allocate page-aligned memory
+    // Allocate page-aligned memory with high-performance Windows fallbacks
     static void* allocate_aligned(size_t size) {
-        size_t aligned_size = (size + RUNTIME_PAGE_SIZE - 1) & ~(RUNTIME_PAGE_SIZE - 1);
+        const size_t page_size = get_cached_page_size();
+        size_t aligned_size = (size + page_size - 1) & ~(page_size - 1);
+        
 #ifdef _WIN32
-        return _aligned_malloc(aligned_size, RUNTIME_PAGE_SIZE);
+        // Try multiple Windows allocation strategies for best performance
+        
+        // Strategy 1: Try VirtualAlloc for page-aligned allocations (often faster)
+        if (aligned_size >= page_size) {
+            void* ptr = VirtualAlloc(nullptr, aligned_size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (ptr) return ptr;
+        }
+        
+        // Strategy 2: Fallback to _aligned_malloc
+        void* ptr = _aligned_malloc(aligned_size, page_size);
+        if (ptr) return ptr;
+        
+        // Strategy 3: Manual alignment as last resort
+        void* raw_ptr = std::malloc(aligned_size + page_size);
+        if (raw_ptr) {
+            uintptr_t addr = reinterpret_cast<uintptr_t>(raw_ptr);
+            uintptr_t aligned_addr = (addr + page_size - 1) & ~(page_size - 1);
+            // Store original pointer just before aligned address for deallocation
+            *reinterpret_cast<void**>(aligned_addr - sizeof(void*)) = raw_ptr;
+            return reinterpret_cast<void*>(aligned_addr);
+        }
+        
+        return nullptr;
 #else
-        return std::aligned_alloc(RUNTIME_PAGE_SIZE, aligned_size);
+        return std::aligned_alloc(page_size, aligned_size);
 #endif
     }
     
@@ -358,10 +390,35 @@ public:
         return allocate_aligned(size);
     }
     
-    // Deallocate aligned memory
+    // Deallocate aligned memory with strategy detection
     static void deallocate_aligned(void* ptr) {
+        if (!ptr) return;
+        
 #ifdef _WIN32
-        _aligned_free(ptr);
+        // Detect allocation strategy by checking memory info
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(ptr, &mbi, sizeof(mbi)) != 0 && 
+            mbi.AllocationBase == ptr && mbi.State == MEM_COMMIT) {
+            // Strategy 1: VirtualAlloc allocated - use VirtualFree
+            VirtualFree(ptr, 0, MEM_RELEASE);
+        } else {
+            // Check if this looks like manual alignment (Strategy 3)
+            uintptr_t addr = reinterpret_cast<uintptr_t>(ptr);
+            const size_t page_size = get_cached_page_size();
+            
+            // If aligned and we can find a stored pointer, it's manual alignment
+            if ((addr & (page_size - 1)) == 0 && addr >= sizeof(void*)) {
+                void** stored_ptr = reinterpret_cast<void**>(addr - sizeof(void*));
+                if (*stored_ptr && *stored_ptr < ptr) {
+                    // Strategy 3: Manual alignment - free original pointer
+                    std::free(*stored_ptr);
+                    return;
+                }
+            }
+            
+            // Strategy 2: _aligned_malloc - use _aligned_free
+            _aligned_free(ptr);
+        }
 #else
         std::free(ptr);
 #endif
@@ -374,17 +431,20 @@ public:
 template<class Record>
 class DirectMemoryCOWManager {
 public:
-    // Memory snapshot header
+    // Memory snapshot header - use fixed-size types for portability
+#pragma pack(push, 1)
     struct MemorySnapshotHeader {
         uint32_t magic = COW_SNAPSHOT_MAGIC;
         uint32_t version = COW_SNAPSHOT_VERSION;
-        size_t total_regions;
-        size_t total_size;
-        unsigned short dimension;
-        unsigned short precision;
-        long root_address;
-        std::chrono::system_clock::time_point snapshot_time;
+        uint64_t total_regions;      // Fixed size instead of size_t
+        uint64_t total_size;         // Fixed size instead of size_t
+        uint16_t dimension;          // Fixed size instead of unsigned short
+        uint16_t precision;          // Fixed size instead of unsigned short
+        uint32_t padding = 0;        // Explicit padding for alignment
+        uint64_t root_address;       // Fixed size instead of long
+        int64_t snapshot_time_us;    // Microseconds since epoch instead of time_point
     };
+#pragma pack(pop)
     
     // Statistics
     struct MemoryCOWStats {
@@ -394,11 +454,19 @@ public:
         bool commit_in_progress;
     };
 
+    enum class BackendType { MMAP, TRADITIONAL };
+    
     DirectMemoryCOWManager(IndexDetails<Record>* index_details,
-                          const std::string& persist_file = "xtree_memory.snapshot")
+                          const std::string& persist_file = "xtree_memory.snapshot",
+                          BackendType backend = BackendType::MMAP)
         : index_details_(index_details), persist_file_(persist_file),
+          backend_type_(determine_backend_type(backend)),
           batch_coordinator_(std::make_unique<BatchUpdateCoordinator<Record>>(
-              PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE)) {
+              PageAlignedMemoryTracker::get_cached_page_size())) {
+        // Initialize mmap backend if selected
+        if (backend_type_ == BackendType::MMAP) {
+            initialize_mmap_backend();
+        }
         // Start persistent background thread for periodic snapshots
         start_background_thread();
     }
@@ -495,9 +563,13 @@ public:
         
         auto start = std::chrono::high_resolution_clock::now();
         
-        // Enable COW protection on all tracked memory
-        memory_tracker_.enable_cow_protection();
-        cow_snapshot_active_ = true;
+        // For MMAP backend, skip COW protection as it would cause SIGSEGV without handler
+        // MMAP already provides persistence through file mapping
+        if (backend_type_ != BackendType::MMAP) {
+            // Enable COW protection on all tracked memory
+            memory_tracker_.enable_cow_protection();
+            cow_snapshot_active_ = true;
+        }
         
         auto cow_time = std::chrono::high_resolution_clock::now() - start;
         auto microseconds = std::chrono::duration_cast<std::chrono::microseconds>(cow_time);
@@ -510,9 +582,11 @@ public:
         std::thread([this]() {
             persist_memory_snapshot();
             
-            // Re-enable writes
-            memory_tracker_.disable_cow_protection();
-            cow_snapshot_active_ = false;
+            // Re-enable writes (only if COW protection was enabled)
+            if (backend_type_ != BackendType::MMAP) {
+                memory_tracker_.disable_cow_protection();
+                cow_snapshot_active_ = false;
+            }
             commit_in_progress_ = false;
         }).detach();
     }
@@ -525,6 +599,10 @@ public:
         stats.commit_in_progress = commit_in_progress_.load();
         return stats;
     }
+    
+    BackendType getBackendType() const {
+        return backend_type_;
+    }
 
     // Register XTree bucket memory for tracking
     void register_bucket_memory(void* bucket_ptr, size_t bucket_size) {
@@ -534,17 +612,18 @@ public:
     // Allocate and register memory with optional huge page support
     void* allocate_and_register(size_t size, bool prefer_huge_page = false) {
         void* ptr = nullptr;
-        bool is_huge = false;
         
-        if (prefer_huge_page) {
-            ptr = PageAlignedMemoryTracker::allocate_aligned_huge(size, is_huge);
-        } else {
-            ptr = PageAlignedMemoryTracker::allocate_aligned(size);
-        }
-        
-        if (ptr) {
-            register_bucket_memory(ptr, size);
-            if (is_huge) {
+        // Always allocate from heap - MMAP is only for persistence
+        {
+            // Traditional heap allocation
+            bool is_huge = false;
+            if (prefer_huge_page) {
+                ptr = PageAlignedMemoryTracker::allocate_aligned_huge(size, is_huge);
+            } else {
+                ptr = PageAlignedMemoryTracker::allocate_aligned(size);
+            }
+            
+            if (ptr && is_huge) {
                 // Mark the region as huge page in tracker
                 std::unique_lock<std::shared_mutex> lock(memory_tracker_.regions_lock_);
                 auto it = memory_tracker_.tracked_regions_.find(ptr);
@@ -552,6 +631,10 @@ public:
                     it->second.is_huge_page = true;
                 }
             }
+        }
+        
+        if (ptr) {
+            register_bucket_memory(ptr, size);
         }
         
         return ptr;
@@ -627,15 +710,17 @@ public:
             
             // Validate dimension and precision match current index (if we have index_details)
             if (index_details_) {
-                if (header.dimension != index_details_->getDimensionCount() ||
-                    header.precision != index_details_->getPrecision()) {
+                if (header.dimension != static_cast<uint16_t>(index_details_->getDimensionCount()) ||
+                    header.precision != static_cast<uint16_t>(index_details_->getPrecision())) {
                     return false;
                 }
             }
             
             // Check for timestamp drift (snapshot too old)
-            auto age = std::chrono::system_clock::now() - header.snapshot_time;
-            auto age_hours = std::chrono::duration_cast<std::chrono::hours>(age).count();
+            auto now = std::chrono::system_clock::now();
+            auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+            auto age_us = now_us - header.snapshot_time_us;
+            auto age_hours = age_us / (1000000LL * 60 * 60);
             if (age_hours > 24) {
 #ifdef _DEBUG
                 std::cerr << "Warning: Snapshot is " << age_hours << " hours old\n";
@@ -646,20 +731,22 @@ public:
             }
             
             // Validate root_address is reasonable (should be at least one page)
-            if (header.root_address != 0 && header.root_address < PageAlignedMemoryTracker::RUNTIME_PAGE_SIZE) {
+            if (header.root_address != 0 && header.root_address < static_cast<uint64_t>(PageAlignedMemoryTracker::get_cached_page_size())) {
                 return false; // Suspicious low address - likely corrupted
             }
             
-            // Read region headers
+            // Read region headers - use fixed-size types for portability
+            #pragma pack(push, 1)
             struct RegionHeader {
-                void* original_addr;
-                size_t size;
-                size_t offset_in_file;
+                uint64_t original_addr;  // Store pointer as uint64_t
+                uint64_t size;
+                uint64_t offset_in_file;
             };
+            #pragma pack(pop)
             
-            size_t expected_data_start = sizeof(MemorySnapshotHeader) + 
+            uint64_t expected_data_start = sizeof(MemorySnapshotHeader) + 
                                        (sizeof(RegionHeader) * header.total_regions);
-            size_t total_data_size = 0;
+            uint64_t total_data_size = 0;
             
             for (size_t i = 0; i < header.total_regions; i++) {
                 RegionHeader rh;
@@ -684,8 +771,8 @@ public:
             
             // Check file size matches expected size
             file.seekg(0, std::ios::end);
-            size_t file_size = file.tellg();
-            size_t expected_size = expected_data_start + total_data_size;
+            uint64_t file_size = static_cast<uint64_t>(file.tellg());
+            uint64_t expected_size = expected_data_start + total_data_size;
             
             if (file_size != expected_size) {
                 return false;
@@ -727,6 +814,7 @@ public:
     }
 
 private:
+    
     IndexDetails<Record>* index_details_;
     PageAlignedMemoryTracker memory_tracker_;
     std::unique_ptr<BatchUpdateCoordinator<Record>> batch_coordinator_;
@@ -738,6 +826,12 @@ private:
     // Background persistence
     std::atomic<bool> shutdown_{false};
     std::string persist_file_;
+    
+    // Backend selection
+    const BackendType backend_type_;
+    // std::unique_ptr<COWMMapManager> mmap_manager_; // Removed - using arena-based approach
+    
+    // MMAP is only used for persistence/snapshots, not for allocation
     
     // Operation counting and thresholds
     std::atomic<size_t> operations_since_snapshot_{0};
@@ -755,6 +849,57 @@ private:
     std::atomic<bool> snapshot_requested_{false};
     
     void persist_memory_snapshot() {
+        if (backend_type_ == BackendType::MMAP) {
+            persist_memory_snapshot_mmap();
+        } else {
+            persist_memory_snapshot_traditional();
+        }
+    }
+    
+    void persist_memory_snapshot_mmap() {
+        // Prepare header
+        MemorySnapshotHeader header = prepare_snapshot_header();
+        
+        // Collect regions with data
+        std::vector<std::pair<size_t, std::pair<const void*, size_t>>> regions;
+        size_t header_and_metadata_size = collect_memory_regions_for_mmap(regions, header);
+        
+        // Get expected total size
+        size_t total_size = header_and_metadata_size;
+        for (const auto& region : regions) {
+            total_size += region.second.second;
+        }
+        
+        // Use mmap manager to write snapshot
+        std::string temp_file = persist_file_ + ".tmp";
+        // MMAP backend removed - use arena-based approach instead
+        throw std::runtime_error("MMAP backend not supported - use arena-based approach");
+        
+        /* Dead code - kept for reference
+        auto* file = mmap_manager_->get_or_create_file(temp_file, total_size);
+        if (!file) {
+            throw std::runtime_error("Failed to create memory-mapped snapshot file");
+        }
+        
+        // Write header at offset 0
+        if (!file->write_direct(0, &header, sizeof(header))) {
+            throw std::runtime_error("Failed to write snapshot header");
+        }
+        
+        // Use optimized batch write for regions
+        if (!file->write_regions_batch_optimized(regions)) {
+            throw std::runtime_error("Failed to write memory regions via mmap");
+        }
+        
+        // Ensure data is persisted
+        file->flush_to_disk();
+        
+        // Atomic rename
+        rename_file_atomic(temp_file, persist_file_);
+        */
+    }
+    
+    void persist_memory_snapshot_traditional() {
         std::string temp_file = persist_file_ + ".tmp";
         
         std::ofstream file(temp_file, std::ios::binary);
@@ -763,24 +908,7 @@ private:
         }
         
         // Write memory snapshot header
-        MemorySnapshotHeader header;
-        
-        {
-            std::shared_lock<std::shared_mutex> lock(memory_tracker_.regions_lock_);
-            header.total_regions = memory_tracker_.tracked_regions_.size();
-            header.total_size = memory_tracker_.get_total_tracked_bytes();
-        }
-        // Only set if index_details is available
-        if (index_details_) {
-            header.dimension = index_details_->getDimensionCount();
-            header.precision = index_details_->getPrecision();
-            header.root_address = index_details_->getRootAddress();
-        } else {
-            header.dimension = 0;
-            header.precision = 0;
-            header.root_address = 0;
-        }
-        header.snapshot_time = std::chrono::system_clock::now();
+        MemorySnapshotHeader header = prepare_snapshot_header();
         
         file.write(reinterpret_cast<const char*>(&header), sizeof(header));
         
@@ -794,29 +922,123 @@ private:
         file.close();
         
         // Atomic rename
+        rename_file_atomic(temp_file, persist_file_);
+    }
+    
+    void rename_file_atomic(const std::string& temp_file, const std::string& final_file) {
 #ifdef _WIN32
         // Windows rename fails if target exists, so delete it first
-        std::remove(persist_file_.c_str());
-        if (std::rename(temp_file.c_str(), persist_file_.c_str()) != 0) {
+        std::remove(final_file.c_str());
+        if (std::rename(temp_file.c_str(), final_file.c_str()) != 0) {
             throw std::runtime_error("Failed to commit memory snapshot");
         }
 #else
-        if (rename(temp_file.c_str(), persist_file_.c_str()) != 0) {
+        if (rename(temp_file.c_str(), final_file.c_str()) != 0) {
             throw std::runtime_error("Failed to commit memory snapshot");
         }
 #endif
         
 #ifdef _DEBUG
-        std::cout << "Memory snapshot persisted to " << persist_file_ << "\n";
+        std::cout << "Memory snapshot persisted to " << final_file << "\n";
 #endif
     }
     
-    void write_memory_regions_to_file(std::ofstream& file) {
+    MemorySnapshotHeader prepare_snapshot_header() {
+        MemorySnapshotHeader header;
+        
+        {
+            std::shared_lock<std::shared_mutex> lock(memory_tracker_.regions_lock_);
+            header.total_regions = memory_tracker_.tracked_regions_.size();
+            header.total_size = memory_tracker_.get_total_tracked_bytes();
+        }
+        
+        // Only set if index_details is available
+        if (index_details_) {
+            header.dimension = static_cast<uint16_t>(index_details_->getDimensionCount());
+            header.precision = static_cast<uint16_t>(index_details_->getPrecision());
+            header.root_address = static_cast<uint64_t>(index_details_->getRootAddress());
+        } else {
+            header.dimension = 0;
+            header.precision = 0;
+            header.root_address = 0;
+        }
+        
+        // Store time as microseconds since epoch for portability
+        auto now = std::chrono::system_clock::now();
+        auto duration = now.time_since_epoch();
+        header.snapshot_time_us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+        
+        return header;
+    }
+    
+    size_t collect_memory_regions_for_mmap(std::vector<std::pair<size_t, std::pair<const void*, size_t>>>& regions,
+                                          const MemorySnapshotHeader& header) {
+        // Use same packed structure as traditional method
+        #pragma pack(push, 1)
         struct RegionHeader {
-            void* original_addr;
-            size_t size;
-            size_t offset_in_file;
+            uint64_t original_addr;
+            uint64_t size;
+            uint64_t offset_in_file;
         };
+        #pragma pack(pop)
+        
+        size_t header_size = sizeof(MemorySnapshotHeader);
+        size_t region_headers_size = 0;
+        
+        // Copy region data while holding the lock
+        std::vector<std::pair<PageAlignedMemoryTracker::MemoryRegion, std::vector<char>>> region_copies;
+        {
+            std::shared_lock<std::shared_mutex> lock(memory_tracker_.regions_lock_);
+            region_headers_size = memory_tracker_.tracked_regions_.size() * sizeof(RegionHeader);
+            
+            for (const auto& [addr, region] : memory_tracker_.tracked_regions_) {
+                // Copy the memory contents
+                std::vector<char> data(region.size);
+                std::memcpy(data.data(), region.start_addr, region.size);
+                region_copies.emplace_back(region, std::move(data));
+            }
+        }
+        
+        // Build regions vector for mmap with proper offsets
+        size_t current_offset = header_size + region_headers_size;
+        regions.reserve(region_copies.size() + 1);
+        
+        // First, we need to write region headers
+        std::vector<RegionHeader> headers;
+        headers.reserve(region_copies.size());
+        
+        for (const auto& [region, data] : region_copies) {
+            RegionHeader rh{
+                reinterpret_cast<uint64_t>(region.start_addr),
+                static_cast<uint64_t>(region.size),
+                current_offset
+            };
+            headers.push_back(rh);
+            
+            // Add the actual data region
+            regions.emplace_back(current_offset, std::make_pair(data.data(), data.size()));
+            current_offset += region.size;
+        }
+        
+        // Add region headers as a single write at the beginning
+        if (!headers.empty()) {
+            regions.insert(regions.begin(), 
+                std::make_pair(header_size, 
+                    std::make_pair(headers.data(), headers.size() * sizeof(RegionHeader))));
+        }
+        
+        return header_size + region_headers_size;
+    }
+    
+    void write_memory_regions_to_file(std::ofstream& file) {
+        // Use same packed structure as in validate_snapshot
+        #pragma pack(push, 1)
+        struct RegionHeader {
+            uint64_t original_addr;
+            uint64_t size;
+            uint64_t offset_in_file;
+        };
+        #pragma pack(pop)
         
         // Copy region data while holding the lock to avoid deadlock during I/O
         std::vector<std::pair<PageAlignedMemoryTracker::MemoryRegion, std::vector<char>>> region_copies;
@@ -833,11 +1055,15 @@ private:
         // Lock released here - no deadlock during I/O
         
         // First pass: write region headers
-        size_t current_offset = sizeof(MemorySnapshotHeader) + 
-                               (sizeof(RegionHeader) * region_copies.size());
+        uint64_t current_offset = sizeof(MemorySnapshotHeader) + 
+                                 (sizeof(RegionHeader) * region_copies.size());
         
         for (const auto& [region, data] : region_copies) {
-            RegionHeader rh{region.start_addr, region.size, current_offset};
+            RegionHeader rh{
+                reinterpret_cast<uint64_t>(region.start_addr),
+                static_cast<uint64_t>(region.size),
+                current_offset
+            };
             file.write(reinterpret_cast<const char*>(&rh), sizeof(rh));
             current_offset += region.size;
         }
@@ -890,6 +1116,36 @@ private:
                 }
             }
         });
+    }
+    
+    static BackendType determine_backend_type(BackendType requested) {
+        // Check environment variable override
+        const char* env_backend = std::getenv("XTREE_COW_BACKEND");
+        if (env_backend) {
+            std::string backend(env_backend);
+            if (backend == "traditional" || backend == "file") {
+                return BackendType::TRADITIONAL;
+            } else if (backend == "mmap") {
+                return BackendType::MMAP;
+            }
+        }
+        
+        // Otherwise use requested type
+        return requested;
+    }
+    
+    void initialize_mmap_backend() {
+        // Calculate expected file size based on current memory usage
+        size_t expected_size = memory_tracker_.get_total_tracked_bytes() * 1.5; // 50% growth margin
+        if (expected_size < 64 * 1024 * 1024) {
+            expected_size = 64 * 1024 * 1024; // Minimum 64MB
+        }
+        
+        // Create mmap manager for snapshots
+        // mmap_manager_ = std::make_unique<COWMMapManager>(expected_size); // Removed - using arena-based approach
+        
+        // MMAP manager is only used for snapshots, not for allocations
+        // This aligns with COW design - minimal overhead during normal operation
     }
 };
 

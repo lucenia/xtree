@@ -1,0 +1,17 @@
+/*
+ * SPDX-License-Identifier: AGPL-3.0-or-later
+ *
+ * Implementation of CompactXTreeAllocator methods that require full type definitions
+ */
+
+#include "compact_xtree_allocator.hpp"
+#include "compact_xtree_allocator_impl.hpp"
+#include "xtree.h"
+#include <iostream>
+
+namespace xtree {
+
+// Explicit instantiation for DataRecord
+template class CompactXTreeAllocator<DataRecord>;
+
+} // namespace xtree

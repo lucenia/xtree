@@ -17,11 +17,53 @@
  * https://www.gnu.org/licenses/agpl-3.0.html
  */
 
+/*
+ * LRUCache - High-Performance, Scalable LRU Cache
+ * -----------------------------------------------
+ *
+ * Design Goals:
+ * - Support billions of nodes with high churn.
+ * - All core operations must be O(1):
+ *     add, get, removeById, removeByObject, removeOne.
+ * - Avoid O(n) scans: we removed the _nodes vector entirely.
+ * - Use unordered_map for O(1) lookup:
+ *     _mapId: IdType -> Node
+ *     _mapObj: CachedObject* -> Node
+ * - Maintain two doubly-linked lists:
+ *     (1) LRU list (all nodes, MRU->LRU order)
+ *     (2) Eviction list (unpinned nodes only, MRU->LRU order)
+ * - Pin/unpin semantics protect nodes from eviction.
+ * - Supports flexible delete policies: none, delete, delete[], free().
+ * - Memory-efficient: node structs hold only pointers needed for LRU + eviction.
+ *
+ * Implementation Notes:
+ * - Thread-safety: all public methods are wrapped with std::mutex for
+ *   multi-threaded safety. If single-threaded, you may strip the lock.
+ * - addToEvictionListMRU: asserts ensure a node cannot be double-inserted
+ *   into the eviction list. Misuse will trigger early in debug builds.
+ * - removeNodeAndDelete: nodes are unlinked, maps cleaned, and all
+ *   next/prev/evict pointers nulled before delete to minimize dangling
+ *   pointer misuse in debug builds.
+ *
+ * Current Structure:
+ * - lru.h: class and node definitions
+ * - lru.hpp: method implementations
+ *
+ * Future Considerations:
+ * - Add capacity limit and eviction policy tuning.
+ * - Make locking policy configurable (NoLock, StdMutex, RWLock).
+ * - Optional statistics/metrics for hit/miss and churn.
+ */
+
 #pragma once
 
-//#include "xtree.h"
-
 #include <cstddef>
+#include <atomic>
+#include <cassert>
+#include <unordered_map>
+#include <mutex>
+#include <shared_mutex>
+
 namespace xtree {
 
     enum LRUCacheDeleteType {
@@ -31,217 +73,337 @@ namespace xtree {
         LRUFreeMalloc
     };
 
-    /**
-     * Generic Node for LRU Caching
-     */
-    template< typename CachedObjectType,
-              typename IdType,
-              LRUCacheDeleteType deleteType >
+    // ------------------------------
+    // Node
+    // ------------------------------
+    template<typename CachedObjectType, typename IdType, LRUCacheDeleteType deleteType>
     struct LRUCacheNode {
+        using _SelfType = LRUCacheNode<CachedObjectType, IdType, deleteType>;
 
-        typedef LRUCacheNode<CachedObjectType, IdType, deleteType> _SelfType;
+        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n)
+            : id(i), object(o), pin_count(0),
+              next(n), prev(nullptr),
+              evictNext(nullptr), evictPrev(nullptr) {}
 
-        explicit LRUCacheNode(const IdType &i, CachedObjectType *o, _SelfType *n)
-                : id(i), object(o), next(n), prev(NULL) {}
+        LRUCacheNode(const LRUCacheNode&) = delete;
+        LRUCacheNode& operator=(const LRUCacheNode&) = delete;
 
-        IdType id;
-        CachedObjectType *object;
-
-        // linked list of cache nodes
-        _SelfType *next;
-        _SelfType *prev;
-    };
-
-    /**
-     *  Used for deleting a node
-     */
-    template< typename CachedObjectType, typename IdType >
-    struct LRUCacheNode< CachedObjectType, IdType, LRUDeleteObject > {
-        typedef LRUCacheNode<CachedObjectType, IdType, LRUDeleteObject> _SelfType;
-
-        explicit LRUCacheNode(const IdType &i, CachedObjectType *o, _SelfType *n)
-                : id(i), object(o), next(n), prev(NULL) {}
-
-        ~LRUCacheNode() { if(object) delete object; }
+        void pin()   { pin_count.fetch_add(1, std::memory_order_relaxed); }
+        void unpin() {
+            auto prev = pin_count.fetch_sub(1, std::memory_order_relaxed);
+            assert(prev > 0 && "Unpin underflow");
+        }
+        inline bool isPinned() const noexcept { return pin_count.load(std::memory_order_relaxed) > 0; }
+        static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
 
         IdType id;
-        CachedObjectType *object;
+        CachedObjectType* object;
+        std::atomic<uint32_t> pin_count;
 
-        // linked list of cache nodes
-        _SelfType *next;
-        _SelfType *prev;
+        // LRU list (all nodes)
+        _SelfType* next;
+        _SelfType* prev;
+
+        // Eviction list (only unpinned)
+        _SelfType* evictNext;
+        _SelfType* evictPrev;
     };
 
-    /**
-     * Used for deleting an array of nodes
-     */
-    template< typename CachedObjectType, typename IdType >
+    // DeleteObject specialization
+    template<typename CachedObjectType, typename IdType>
+    struct LRUCacheNode<CachedObjectType, IdType, LRUDeleteObject> {
+        using _SelfType = LRUCacheNode<CachedObjectType, IdType, LRUDeleteObject>;
+
+        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n)
+            : id(i), object(o), pin_count(0),
+              next(n), prev(nullptr),
+              evictNext(nullptr), evictPrev(nullptr) {}
+
+        ~LRUCacheNode() { if (object) delete object; }
+
+        LRUCacheNode(const LRUCacheNode&) = delete;
+        LRUCacheNode& operator=(const LRUCacheNode&) = delete;
+
+        void pin()   { pin_count.fetch_add(1, std::memory_order_relaxed); }
+        void unpin() {
+            auto prev = pin_count.fetch_sub(1, std::memory_order_relaxed);
+            assert(prev > 0 && "Unpin underflow");
+        }
+        inline bool isPinned() const noexcept { return pin_count.load(std::memory_order_relaxed) > 0; }
+        static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
+
+        IdType id;
+        CachedObjectType* object;
+        std::atomic<uint32_t> pin_count;
+
+        _SelfType* next;
+        _SelfType* prev;
+        _SelfType* evictNext;
+        _SelfType* evictPrev;
+    };
+
+    // DeleteArray specialization
+    template<typename CachedObjectType, typename IdType>
     struct LRUCacheNode<CachedObjectType, IdType, LRUDeleteArray> {
-        typedef LRUCacheNode<CachedObjectType, IdType, LRUDeleteArray> _SelfType;
+        using _SelfType = LRUCacheNode<CachedObjectType, IdType, LRUDeleteArray>;
 
-        explicit LRUCacheNode(const IdType &i, CachedObjectType *o, _SelfType *n)
-                : id(i), object(o), next(n), prev(NULL) {}
+        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n)
+            : id(i), object(o), pin_count(0),
+              next(n), prev(nullptr),
+              evictNext(nullptr), evictPrev(nullptr) {}
 
-        ~LRUCacheNode() { if(object) delete[] object; }
+        ~LRUCacheNode() { if (object) delete[] object; }
+
+        LRUCacheNode(const LRUCacheNode&) = delete;
+        LRUCacheNode& operator=(const LRUCacheNode&) = delete;
+
+        void pin()   { pin_count.fetch_add(1, std::memory_order_relaxed); }
+        void unpin() {
+            auto prev = pin_count.fetch_sub(1, std::memory_order_relaxed);
+            assert(prev > 0 && "Unpin underflow");
+        }
+        inline bool isPinned() const noexcept { return pin_count.load(std::memory_order_relaxed) > 0; }
+        static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
 
         IdType id;
-        CachedObjectType *object;
+        CachedObjectType* object;
+        std::atomic<uint32_t> pin_count;
 
-        // linked list of cache nodes
-        _SelfType *next;
-        _SelfType *prev;
+        _SelfType* next;
+        _SelfType* prev;
+        _SelfType* evictNext;
+        _SelfType* evictPrev;
     };
 
-    /**
-     * Used for calling free / malloc
-     */
-    template< typename CachedObjectType, typename IdType >
+    // Free malloc specialization
+    template<typename CachedObjectType, typename IdType>
     struct LRUCacheNode<CachedObjectType, IdType, LRUFreeMalloc> {
-        typedef LRUCacheNode<CachedObjectType, IdType, LRUFreeMalloc> _SelfType;
+        using _SelfType = LRUCacheNode<CachedObjectType, IdType, LRUFreeMalloc>;
 
-        explicit LRUCacheNode(IdType &i, CachedObjectType *o, _SelfType *n)
-                : id(i), object(o), next(n), prev(NULL) {}
+        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n)
+            : id(i), object(o), pin_count(0),
+              next(n), prev(nullptr),
+              evictNext(nullptr), evictPrev(nullptr) {}
 
-        ~LRUCacheNode() { if(object) free(object); }
+        ~LRUCacheNode() { if (object) free(object); }
+
+        LRUCacheNode(const LRUCacheNode&) = delete;
+        LRUCacheNode& operator=(const LRUCacheNode&) = delete;
+
+        void pin()   { pin_count.fetch_add(1, std::memory_order_relaxed); }
+        void unpin() {
+            auto prev = pin_count.fetch_sub(1, std::memory_order_relaxed);
+            assert(prev > 0 && "Unpin underflow");
+        }
+        inline bool isPinned() const noexcept { return pin_count.load(std::memory_order_relaxed) > 0; }
+        static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
 
         IdType id;
-        CachedObjectType *object;
+        CachedObjectType* object;
+        std::atomic<uint32_t> pin_count;
 
-        // linked list functionality
-        _SelfType *next;
-        _SelfType *prev;
+        _SelfType* next;
+        _SelfType* prev;
+        _SelfType* evictNext;
+        _SelfType* evictPrev;
     };
 
-    /**
-     * Used for sorting cache nodes
-     */
-     template< typename _LRUCacheNode >
-     struct LRUCacheNodeSorter {
-        typedef _LRUCacheNode first_argument_type;
-        typedef _LRUCacheNode second_argument_type;
-        typedef bool result_type;
+    // ------------------------------
+    // Cache
+    // ------------------------------
+    template<typename CachedObjectType, typename IdType, LRUCacheDeleteType deleteObject>
+    class LRUCache {
+    public:
+        using Node   = LRUCacheNode<CachedObjectType, IdType, deleteObject>;
+        using IdMap  = std::unordered_map<IdType, Node*>;
+        using ObjMap = std::unordered_map<CachedObjectType*, Node*>;
 
-        bool operator() (const _LRUCacheNode* const n1, const _LRUCacheNode* const n2) {
-            return n1->id < n2->id;
+        // Result struct for acquirePinned
+        struct AcquireResult {
+            Node* node;
+            bool created;  // true if new node was created, false if existing was returned
+        };
+
+        LRUCache()
+            : _first(nullptr), _last(nullptr),
+              _evictFirst(nullptr), _evictLast(nullptr) {}
+
+        ~LRUCache() { clear(); }
+
+        // O(1) add
+        Node* add(const IdType& id, CachedObjectType* object);
+
+        // O(1) atomic get-or-create, returns node already pinned
+        // Thread-safe: If id exists, pins and returns existing node
+        // If id doesn't exist, creates new node with objIfAbsent, pins it, and returns it
+        // Caller is responsible for unpinning (use ScopedPin for RAII)
+        // Returns AcquireResult with node pointer and created flag
+        AcquireResult acquirePinned(const IdType& id, CachedObjectType* objIfAbsent);
+
+        // Atomically acquire a pinned node, persisting only if created
+        // persistFn is called exactly once if a new object is inserted
+        // Returns AcquireResult with node pointer and created flag
+        template<typename PersistFn>
+        AcquireResult acquirePinnedWithPersist(const IdType& id, CachedObjectType* objIfAbsent, PersistFn persistFn) noexcept;
+
+        // O(1) get + LRU promote
+        CachedObjectType* get(const IdType& id);
+
+        // O(1) peek without LRU update (read-only fast path)
+        CachedObjectType* peek(const IdType& id) const;
+
+        // Internal node lookup for cache coherence helpers
+        // Returns the internal node for a given key if it exists, or nullptr.
+        // Does NOT modify recency lists or pin counts.
+        inline Node* find_node_internal(const IdType& id) noexcept {
+            auto it = _mapId.find(id);
+            return (it == _mapId.end()) ? nullptr : it->second;
         }
-     };
 
-     /**
-      * Definition for LRU Cache functionality
-      */
-     template< typename CachedObjectType, typename IdType, LRUCacheDeleteType deleteObject >
-     class LRUCache {
-     public:
-//        typedef LRUCache<CachedObjectType, IdType, deleteObject> _SelfType;
-        typedef size_t sizeType;
-        typedef LRUCacheNode<CachedObjectType, IdType, deleteObject> Node;
-        typedef vector<Node*> NodeArray;
-        typedef typename NodeArray::iterator NodeIterator;
-        typedef LRUCacheNodeSorter<Node> NodeSorter;
-
-        explicit LRUCache(const sizeType &maxMemory)
-                : _first(NULL), _last(NULL), _maxMemory(maxMemory) {
-            // memory size based - this will be dynamic
+        inline const Node* find_node_internal(const IdType& id) const noexcept {
+            auto it = _mapId.find(id);
+            return (it == _mapId.end()) ? nullptr : it->second;
         }
 
-        /**
-         * Delete all of the nodes from the cache
-         *     this calls the destructor contained in LRUCacheNode
-         */
-        ~LRUCache() {
-            NodeIterator i = _nodes.begin();
-            const NodeIterator end = _nodes.end();
-            for(; i!=end; i++)
-                delete *i;
+        // O(1) eviction (returns detached node; caller deletes)
+        Node* removeOne();
+
+        // O(1) removals by key or by object
+        // removeById: Removes node and returns the cached object pointer
+        // IMPORTANT: Ownership transfers to caller - caller MUST delete/free the
+        // returned object appropriately based on how it was allocated
+        // Returns nullptr if ID not found
+        CachedObjectType* removeById(const IdType& id);
+
+        // removeByObject: Removes and deletes the node containing this object
+        // Returns true if removed, false if not found or pinned
+        bool removeByObject(CachedObjectType* object);
+
+        // Back-compat wrapper (delete + remove)
+        void remove(CachedObjectType* object) { (void)removeByObject(object); }
+
+        // Atomically change the key for an existing cache entry.
+        // This is needed when COW reallocates a bucket to a new NodeID.
+        // The node and object pointer stay the same, only the index key changes.
+        // Returns true if successful, false if old_id not found or new_id already exists.
+        bool rekey(const IdType& old_id, const IdType& new_id);
+
+        // Detach a node from the cache for transfer to another shard.
+        // Unlike removeById, this works even for pinned nodes and returns
+        // the node itself (not just the object) so pin state can be preserved.
+        // Caller takes ownership of the returned node and must delete it or re-add it.
+        // Returns nullptr if id not found.
+        Node* detach_node(const IdType& id);
+
+        // Re-attach a detached node with a new ID.
+        // Used for cross-shard rekey operations.
+        // Returns true if successful, false if new_id already exists.
+        bool attach_node(const IdType& new_id, Node* node);
+
+        // Pin helpers (update eviction membership)
+        void pin(Node* n) {
+            assert(n);
+            std::unique_lock<std::shared_mutex> lock(_mtx);
+            if (!n->isPinned()) {
+                n->pin();
+                removeFromEvictionList(n);
+            } else {
+                n->pin();
+            }
+        }
+        void unpin(Node* n) {
+            assert(n);
+            std::unique_lock<std::shared_mutex> lock(_mtx);
+            n->unpin();
+            if (!n->isPinned()) addToEvictionListMRU(n);
+        }
+        static bool is_pinned(const Node* n) { return n && n->isPinned(); }
+
+        // Destroy everything
+        void clear();
+
+        // Stats
+        size_t size() const {
+            std::shared_lock<std::shared_mutex> lock(_mtx);
+            return _mapId.size();
         }
 
-        size_t getMaxMemory() { return _maxMemory; }
-        void updateMaxMemory(sizeType maxMemory) { _maxMemory = maxMemory; }
+        // Count evictable (unpinned) nodes
+        size_t evictableCount() const {
+            std::shared_lock<std::shared_mutex> lock(_mtx);
+            size_t count = 0;
+            Node* cur = _evictFirst;
+            while (cur) {
+                count++;
+                cur = cur->evictNext;
+            }
+            return count;
+        }
 
+        // Count pinned nodes
+        size_t pinnedCount() const {
+            std::shared_lock<std::shared_mutex> lock(_mtx);
+            // Total - evictable = pinned
+            return size() - evictableCount();
+        }
 
-        /**
-         * Gets an item by id
-         */
-        CachedObjectType* get(const IdType &id);
+    private:
+        // Helper to free object based on delete policy
+        static void freeObject(CachedObjectType* obj) {
+            if (!obj) return;
+            if constexpr (deleteObject == LRUDeleteObject) delete obj;
+            else if constexpr (deleteObject == LRUDeleteArray) delete[] obj;
+            else if constexpr (deleteObject == LRUFreeMalloc) free(obj);
+            // else deleteObject == LRUDeleteNone → do nothing
+        }
 
-        /**
-         * adds an item to the LRUCache
-         */
-         Node* add(const IdType &id, CachedObjectType *object);
+        // Thread safety - shared_mutex for read/write separation
+        mutable std::shared_mutex _mtx;
 
-        /**
-         * removes an arbitrary node from the cache
-         */
-         Node* removeOne();
+        // Fast lookups
+        IdMap  _mapId;
+        ObjMap _mapObj;
 
-         /**
-          * removes the CachedObjectType pointer from the vector and
-          * adjusts the doubly linked list
-          */
-         void remove(CachedObjectType *object) {
-             // Find the node that contains this object
-             typename NodeArray::iterator trgtIter = _nodes.begin();
-             for (; trgtIter != _nodes.end(); ++trgtIter) {
-                 if ((*trgtIter)->object == object) {
-                     break;
-                 }
-             }
-             
-             if (trgtIter == _nodes.end()) {
-                 return; // Object not found
-             }
-             
-             Node* trgt = *trgtIter;
-             
-             // Update the doubly-linked list
-             if (trgt->prev) {
-                 trgt->prev->next = trgt->next;
-             } else {
-                 // This was the first node
-                 _first = trgt->next;
-             }
-             
-             if (trgt->next) {
-                 trgt->next->prev = trgt->prev;
-             } else {
-                 // This was the last node
-                 _last = trgt->prev;
-             }
-             
-             // Remove from the vector
-             _nodes.erase(trgtIter);
-             
-             // Delete the node
-             delete trgt;
-         }
-         
-         /**
-          * Clears all nodes from the cache, deleting all cached objects.
-          * This is useful for test cleanup to prevent memory leaks.
-          */
-         void clear() {
-             // Delete all nodes in the cache
-             NodeIterator i = _nodes.begin();
-             const NodeIterator end = _nodes.end();
-             for(; i!=end; i++)
-                 delete *i;
-             _nodes.clear();
-             _first = NULL;
-             _last = NULL;
-         }
+        // LRU list (all nodes)
+        Node* _first; // MRU
+        Node* _last;  // LRU
 
-     private:
-        //
-//        static _SelfType* _lruCache;
+        // Eviction list (only unpinned nodes)
+        Node* _evictFirst; // MRU unpinned
+        Node* _evictLast;  // LRU unpinned
 
-        // facilitate easy lookup by ID
-        NodeArray _nodes;       // 24 bytes
+        // List ops
+        void promoteToMRU(Node* n);
+        void unlinkFromLRU(Node* n);
 
-        // facilitate order by LRU
-        Node* _first;           // 8 bytes
-        Node* _last;            // 8 bytes
+        // Eviction list ops
+        void removeFromEvictionList(Node* n);
+        void addToEvictionListMRU(Node* n);
 
-        sizeType _maxMemory;    // 8 bytes
-     };  // TOTAL: 48 bytes
+        // Unified internal removals
+        void removeNodeAndDelete(Node* n);
+        Node* removeNodeAndReturn(Node* n);
+    };
 
-}
+    // ------------------------------
+    // RAII pin helper - MUST use cache's pin/unpin for eviction list safety
+    // ------------------------------
+    template<typename Cache, typename Node>
+    class ScopedPin {
+        Cache& cache;
+        Node* node;
+    public:
+        ScopedPin(Cache& c, Node* n) : cache(c), node(n) {
+            if (node) cache.pin(node);     // updates eviction list + locks
+        }
+        ~ScopedPin() {
+            if (node) cache.unpin(node);   // updates eviction list + locks
+        }
+
+        ScopedPin(const ScopedPin&) = delete;
+        ScopedPin& operator=(const ScopedPin&) = delete;
+        ScopedPin(ScopedPin&&) = delete;
+        ScopedPin& operator=(ScopedPin&&) = delete;
+    };
+
+} // namespace xtree
