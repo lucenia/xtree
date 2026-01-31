@@ -13,7 +13,7 @@
 #include <random>
 
 using namespace xtree;
-using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>;
+using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>;
 
 class XTreePointSearchTest : public ::testing::Test {
 protected:

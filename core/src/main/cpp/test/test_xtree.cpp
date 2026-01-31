@@ -30,7 +30,7 @@
 using namespace xtree;
 using namespace std;
 using ::testing::Return;
-using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>;
+using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>;
 
 // Define a mock Record to insert into the XTree
 class MockRecord : public IRecord {

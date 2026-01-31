@@ -13,7 +13,7 @@
 
 using namespace xtree;
 using namespace std::chrono;
-using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>;
+using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>;
 
 class ProductionReadySnapshotTest : public ::testing::Test {
 protected:

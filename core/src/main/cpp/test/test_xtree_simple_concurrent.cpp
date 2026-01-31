@@ -13,7 +13,7 @@
 #include <iostream>
 
 using namespace xtree;
-using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>;
+using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>;
 
 class SimpleXTreeConcurrentTest : public ::testing::Test {
 protected:

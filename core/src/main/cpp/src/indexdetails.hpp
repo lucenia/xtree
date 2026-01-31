@@ -61,10 +61,11 @@ namespace xtree {
     public:
         // Cache type definitions - using sharded cache for scalability
         // 32 shards by default, with global object map for O(1) removeByObject
-        using Cache = ShardedLRUCache<IRecord, UniqueId, LRUDeleteNone>;
+        // LRUDeleteObject ensures evicted objects are freed (enables memory budget)
+        using Cache = ShardedLRUCache<IRecord, UniqueId, LRUDeleteObject>;
         using CacheNode = typename Cache::Node;
         // Note: To switch back to unsharded, use:
-        // using Cache = LRUCache<IRecord, UniqueId, LRUDeleteNone>;
+        // using Cache = LRUCache<IRecord, UniqueId, LRUDeleteObject>;
 
         enum class PersistenceMode {
             IN_MEMORY,  // Pure in-memory, no persistence
@@ -214,7 +215,7 @@ namespace xtree {
          * @param persist Whether to emit a WAL delta (false during recovery)
          */
         void setRootIdentity(uint64_t cache_key, persist::NodeID id,
-                           LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>* cn,
+                           CacheNode* cn,
                            bool persist = true) {
             root_cache_key_ = cache_key;   // still useful (debug/telemetry)
             root_node_id_   = id;          // durable identity
@@ -250,7 +251,7 @@ namespace xtree {
         //              is just one atomic load and a branch - essentially free
         // Throws: std::runtime_error if root reconstruction fails
         //         (e.g., corrupted persistence data)
-        LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>* root_cache_node() noexcept(false) {
+        CacheNode* root_cache_node() noexcept(false) {
             // Always load the current root version
             uint64_t current_version = root_version_.load(std::memory_order_acquire);
 
@@ -284,7 +285,7 @@ namespace xtree {
 
         // Const accessor that doesn't attempt rebuild (peek at current state only)
         // Returns const pointer to enforce read-only semantics
-        const LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>* root_cache_node_peek() const {
+        const CacheNode* root_cache_node_peek() const {
             return root_cn_;
         }
 
@@ -706,7 +707,7 @@ namespace xtree {
         // Root tracking - single source of truth
         uint64_t        root_cache_key_ = 0;                    // informational
         persist::NodeID root_node_id_   = persist::NodeID::invalid();
-        LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>* root_cn_ = nullptr;  // authoritative pointer
+        CacheNode* root_cn_ = nullptr;  // authoritative pointer
         mutable std::mutex root_init_mutex_;                    // Thread-safety for root initialization
 
         // Root version tracking for automatic cache invalidation on splits
