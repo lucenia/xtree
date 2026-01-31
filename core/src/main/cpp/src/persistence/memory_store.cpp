@@ -18,6 +18,7 @@
  */
 
 #include "memory_store.h"
+#include "../util/log.h"
 #include <cstring>
 #include <stdexcept>
 #include <atomic>
