@@ -437,13 +437,43 @@ namespace xtree {
         // Use leak-on-exit singleton to avoid static destruction order issues
         static Cache& getCache() {
             // Construct-on-first-use; intentionally leaked to avoid shutdown order issues
-            static Cache* instance = new Cache(32, true);  // 32 shards, global map enabled
+            static Cache* instance = []() {
+                auto* cache = new Cache(32, true);  // 32 shards, global map enabled
+                // Configure memory sizer for IRecord types
+                cache->setMemorySizer([](const IRecord* obj) -> size_t {
+                    if (!obj) return 0;
+                    return static_cast<size_t>(obj->memoryUsage());
+                });
+                return cache;
+            }();
             return *instance;
         }
-        
+
         // Clear the cache - useful for test cleanup to prevent memory leaks
         // When using LRUDeleteNone, this will only delete cache nodes, not the cached objects
         static void clearCache() { getCache().clear(); }
+
+        // Configure cache memory budget (0 = unlimited)
+        // When budget is exceeded, LRU entries are automatically evicted
+        static void setCacheMaxMemory(size_t bytes) {
+            getCache().setMaxMemory(bytes);
+        }
+
+        static size_t getCacheMaxMemory() {
+            return getCache().getMaxMemory();
+        }
+
+        static size_t getCacheCurrentMemory() {
+            return getCache().getCurrentMemory();
+        }
+
+        // Explicitly evict cache entries to bring memory under budget
+        // IMPORTANT: Only call this at safe points (e.g., after batch insert or commit)
+        // when no tree traversal is in progress, as eviction may free unpinned nodes
+        // Returns number of entries evicted
+        static size_t evictCacheToMemoryBudget() {
+            return getCache().evictToMemoryBudget();
+        }
 
         void updateDetails(unsigned short precision,
                       vector<const char*> *dimLabels) {

@@ -12,6 +12,7 @@
 #include "object_table.hpp"
 #include "ot_checkpoint.h"
 #include "ot_delta_log.h"
+#include "../util/log.h"
 #include <array>
 #include <atomic>
 #include <memory>

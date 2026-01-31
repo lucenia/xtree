@@ -748,8 +748,9 @@ namespace xtree {
             }
 
             // Unpin the node now - acquirePinned returns pinned
+            // CRITICAL: Must use cache.unpin() not node->unpin() to update eviction list!
             if (_cache_ptr) {
-                _cache_ptr->unpin();
+                idx->getCache().unpin(_cache_ptr, cache_key);
             }
 
             // Set the key reference if needed (for MBR-based filtering)

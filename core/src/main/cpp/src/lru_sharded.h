@@ -41,8 +41,14 @@ public:
     using IdType = Id;
     using CachedObjectType = T;
 
+    // Function type for getting memory size of an object
+    // Default implementation tries object->memoryUsage(), falls back to fixed estimate
+    using MemorySizer = std::function<size_t(const T*)>;
+
     explicit ShardedLRUCache(size_t numShards = 32, bool enableGlobalObjMap = false)
         : _evictCounter(0),
+          _currentMemory(0),
+          _maxMemory(0),  // 0 = unlimited
           _useGlobalObjMap(enableGlobalObjMap) {
         // Pre-size power of 2 for efficient modulo
         size_t powerOf2 = 1;
@@ -54,20 +60,96 @@ public:
         for (size_t i = 0; i < powerOf2; ++i) {
             _shards.emplace_back(std::make_unique<Shard>());
         }
+
+        // Default memory sizer - uses a fixed estimate per object
+        // Users can call setMemorySizer() for accurate tracking with types that have memoryUsage()
+        _memorySizer = [](const T*) -> size_t {
+            // Default: assume 256 bytes per object (reasonable estimate for cache entries)
+            // For accurate tracking, call setMemorySizer() with a custom function
+            return 256;
+        };
+    }
+
+    // Helper to create a memory sizer for types with memoryUsage() method
+    // Usage: cache.setMemorySizer(ShardedLRUCache::makeMemorySizer());
+    static MemorySizer makeMemorySizer() {
+        return [](const T* obj) -> size_t {
+            if (!obj) return 0;
+            return static_cast<size_t>(obj->memoryUsage());
+        };
     }
 
     ~ShardedLRUCache() = default;
 
+    // ========== Memory Budget Configuration ==========
+
+    // Set maximum memory budget (0 = unlimited)
+    // When budget is exceeded, LRU entries are evicted until under budget
+    void setMaxMemory(size_t bytes) {
+        _maxMemory.store(bytes, std::memory_order_relaxed);
+        // Trigger eviction if we're now over budget
+        if (bytes > 0) {
+            evictToMemoryBudget();
+        }
+    }
+
+    size_t getMaxMemory() const {
+        return _maxMemory.load(std::memory_order_relaxed);
+    }
+
+    size_t getCurrentMemory() const {
+        return _currentMemory.load(std::memory_order_relaxed);
+    }
+
+    // Set custom memory sizer function
+    void setMemorySizer(MemorySizer sizer) {
+        _memorySizer = std::move(sizer);
+    }
+
+    // Evict entries until memory usage is under budget
+    // Returns number of entries evicted
+    size_t evictToMemoryBudget() {
+        size_t maxMem = _maxMemory.load(std::memory_order_relaxed);
+        if (maxMem == 0) return 0;  // No limit
+
+        size_t evicted = 0;
+        while (_currentMemory.load(std::memory_order_relaxed) > maxMem) {
+            Node* node = removeOne();
+            if (!node) break;  // Nothing left to evict
+
+            // Memory already decremented in removeOne()
+            // Node is returned to caller who must handle deletion
+            // For LRUDeleteObject/Array/Malloc, the node destructor handles object cleanup
+            delete node;
+            evicted++;
+        }
+        return evicted;
+    }
+
     // O(1) add to appropriate shard
+    // NOTE: Does NOT automatically evict - caller should call evictToMemoryBudget() at safe points
+    // (e.g., after batch insert or commit) because evicting during tree traversal can cause
+    // use-after-free when parent nodes are temporarily unpinned.
     Node* add(const Id& id, T* object) {
         size_t shardIdx = getShardIndex(id);
         auto& shard = *_shards[shardIdx];
         Node* node = shard.add(id, object);
 
-        // Track in global map if enabled
-        if (_useGlobalObjMap && node) {
-            std::lock_guard<std::mutex> lock(_globalMapMtx);
-            _globalObjMap[object] = shardIdx;
+        if (node) {
+            // Track memory usage (only if budget is enabled)
+            if (_maxMemory.load(std::memory_order_relaxed) > 0) {
+                size_t objSize = _memorySizer(object);
+                _currentMemory.fetch_add(objSize, std::memory_order_relaxed);
+            }
+
+            // Track in global map if enabled
+            if (_useGlobalObjMap) {
+                std::lock_guard<std::mutex> lock(_globalMapMtx);
+                _globalObjMap[object] = shardIdx;
+            }
+
+            // NOTE: Do NOT evict here - it's unsafe during tree traversal
+            // Caller should call evictToMemoryBudget() explicitly at safe points
         }
 
         return node;
@@ -76,15 +158,24 @@ public:
     // O(1) atomic get-or-create, returns node already pinned
     // Thread-safe: If id exists, pins and returns existing node
     // If id doesn't exist, creates new node with objIfAbsent, pins it, and returns it
+    // NOTE: Does NOT automatically evict - see add() comment for rationale
     AcquireResult acquirePinned(const Id& id, T* objIfAbsent) {
         size_t shardIdx = getShardIndex(id);
         auto& shard = *_shards[shardIdx];
         AcquireResult result = shard.acquirePinned(id, objIfAbsent);
 
-        // Track in global map if enabled and newly created
-        if (_useGlobalObjMap && result.created && result.node) {
-            std::lock_guard<std::mutex> lock(_globalMapMtx);
-            _globalObjMap[result.node->object] = shardIdx;
+        // Track memory and global map if newly created
+        if (result.created && result.node) {
+            // Track memory usage (only if budget is enabled)
+            if (_maxMemory.load(std::memory_order_relaxed) > 0) {
+                size_t objSize = _memorySizer(result.node->object);
+                _currentMemory.fetch_add(objSize, std::memory_order_relaxed);
+            }
+
+            if (_useGlobalObjMap) {
+                std::lock_guard<std::mutex> lock(_globalMapMtx);
+                _globalObjMap[result.node->object] = shardIdx;
+            }
         }
 
         return result;
@@ -93,6 +184,7 @@ public:
     // Atomically acquire a pinned node, persisting only if created
     // persistFn is called exactly once if a new object is inserted
     // Returns AcquireResult with node pointer and created flag
+    // NOTE: Does NOT automatically evict - see add() comment for rationale
     template<typename PersistFn>
     AcquireResult acquirePinnedWithPersist(const Id& id, T* objIfAbsent, PersistFn persistFn) noexcept {
         size_t shardIdx = getShardIndex(id);
@@ -100,10 +192,18 @@ public:
 
         auto result = shard.acquirePinnedWithPersist(id, objIfAbsent, persistFn);
 
-        // Track in global map if enabled and newly created
-        if (_useGlobalObjMap && result.created && result.node) {
-            std::lock_guard<std::mutex> lock(_globalMapMtx);
-            _globalObjMap[result.node->object] = shardIdx;
+        // Track memory and global map if newly created
+        if (result.created && result.node) {
+            // Track memory usage (only if budget is enabled)
+            if (_maxMemory.load(std::memory_order_relaxed) > 0) {
+                size_t objSize = _memorySizer(result.node->object);
+                _currentMemory.fetch_add(objSize, std::memory_order_relaxed);
+            }
+
+            if (_useGlobalObjMap) {
+                std::lock_guard<std::mutex> lock(_globalMapMtx);
+                _globalObjMap[result.node->object] = shardIdx;
+            }
         }
 
         return result; // Return full AcquireResult with created flag
@@ -127,10 +227,18 @@ public:
         auto& shard = *getShard(id);
         T* object = shard.removeById(id);
 
-        // Clean up global map if object was removed
-        if (_useGlobalObjMap && object) {
-            std::lock_guard<std::mutex> lock(_globalMapMtx);
-            _globalObjMap.erase(object);
+        if (object) {
+            // Decrement memory usage (only if budget is enabled)
+            if (_maxMemory.load(std::memory_order_relaxed) > 0) {
+                size_t objSize = _memorySizer(object);
+                _currentMemory.fetch_sub(objSize, std::memory_order_relaxed);
+            }
+
+            // Clean up global map if enabled
+            if (_useGlobalObjMap) {
+                std::lock_guard<std::mutex> lock(_globalMapMtx);
+                _globalObjMap.erase(object);
+            }
         }
 
         return object;  // Transfer ownership to caller
@@ -139,6 +247,10 @@ public:
     // O(1) with global map, O(numShards) without
     // Return true if removed, false if not found or pinned
     bool removeByObject(T* object) {
+        // Only calculate memory if budget is enabled (avoid virtual call overhead)
+        const bool trackMemory = _maxMemory.load(std::memory_order_relaxed) > 0;
+        size_t objSize = trackMemory ? _memorySizer(object) : 0;
+
         if (_useGlobalObjMap) {
             // 1) Read shard index under the global map lock
             size_t shardIdx;
@@ -152,8 +264,11 @@ public:
             // 2) Do the shard removal WITHOUT the global map lock
             bool removed = _shards[shardIdx]->removeByObject(object);
 
-            // 3) If removed, clean up the global map
+            // 3) If removed, clean up memory tracking and global map
             if (removed) {
+                if (trackMemory) {
+                    _currentMemory.fetch_sub(objSize, std::memory_order_relaxed);
+                }
                 std::lock_guard<std::mutex> g(_globalMapMtx);
                 _globalObjMap.erase(object);
             }
@@ -161,7 +276,12 @@ public:
         } else {
             // O(numShards) scan path
             for (auto& shard : _shards) {
-                if (shard->removeByObject(object)) return true;
+                if (shard->removeByObject(object)) {
+                    if (trackMemory) {
+                        _currentMemory.fetch_sub(objSize, std::memory_order_relaxed);
+                    }
+                    return true;
+                }
             }
             return false;
         }
@@ -177,15 +297,26 @@ public:
         // Round-robin through shards for even eviction
         size_t startIdx = _evictCounter.fetch_add(1, std::memory_order_relaxed);
 
+        // Only track memory if budget is enabled
+        const bool trackMemory = _maxMemory.load(std::memory_order_relaxed) > 0;
+
         // Try each shard starting from current position
         for (size_t i = 0; i < _shards.size(); ++i) {
             size_t idx = (startIdx + i) & _shardMask;
             Node* evicted = _shards[idx]->removeOne();
             if (evicted) {
-                // Clean up global map before returning
-                if (_useGlobalObjMap && evicted->object) {
-                    std::lock_guard<std::mutex> lock(_globalMapMtx);
-                    _globalObjMap.erase(evicted->object);
+                // Decrement memory usage (only if budget is enabled)
+                if (evicted->object) {
+                    if (trackMemory) {
+                        size_t objSize = _memorySizer(evicted->object);
+                        _currentMemory.fetch_sub(objSize, std::memory_order_relaxed);
+                    }
+
+                    // Clean up global map
+                    if (_useGlobalObjMap) {
+                        std::lock_guard<std::mutex> lock(_globalMapMtx);
+                        _globalObjMap.erase(evicted->object);
+                    }
                 }
                 return evicted;
             }
@@ -255,6 +386,9 @@ public:
             shard->clear();
         }
 
+        // Reset memory tracking
+        _currentMemory.store(0, std::memory_order_relaxed);
+
         if (_useGlobalObjMap) {
             std::lock_guard<std::mutex> lock(_globalMapMtx);
             _globalObjMap.clear();
@@ -266,12 +400,16 @@ public:
         size_t totalNodes = 0;
         size_t totalPinned = 0;
         size_t totalEvictable = 0;
+        size_t currentMemory = 0;
+        size_t maxMemory = 0;
         std::vector<size_t> nodesPerShard;
     };
 
     Stats getStats() const {
         Stats stats;
         stats.nodesPerShard.reserve(_shards.size());
+        stats.currentMemory = _currentMemory.load(std::memory_order_relaxed);
+        stats.maxMemory = _maxMemory.load(std::memory_order_relaxed);
 
         for (const auto& shard : _shards) {
             size_t shardSize = shard->size();
@@ -287,6 +425,7 @@ public:
     // Semantic cache coherence helpers for XTree durability layer
     // Lookup or add a cache entry for a given key and record pointer.
     // Ensures coherence between CacheNode->object and the current record.
+    // Note: add() handles memory tracking internally
     Node* lookup_or_attach(const Id& key, T* record) {
         Node* cn = find_node(key);
         if (cn) {
@@ -294,7 +433,7 @@ public:
                 cn->object = record;
             return cn;
         }
-        return this->add(key, record);
+        return this->add(key, record);  // add() tracks memory
     }
 
     // Lookup cache node only (no insert).
@@ -318,6 +457,11 @@ private:
     std::vector<std::unique_ptr<Shard>> _shards;
     size_t _shardMask;  // For fast modulo with power-of-2
     mutable std::atomic<size_t> _evictCounter;
+
+    // Memory budget tracking
+    std::atomic<size_t> _currentMemory;  // Current memory usage in bytes
+    std::atomic<size_t> _maxMemory;      // Maximum allowed memory (0 = unlimited)
+    MemorySizer _memorySizer;            // Function to get object memory size
 
     // Optional global object->shard mapping for O(1) removeByObject
     bool _useGlobalObjMap;

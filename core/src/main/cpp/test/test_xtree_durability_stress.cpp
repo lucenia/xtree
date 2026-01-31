@@ -494,6 +494,15 @@ TEST_F(XTreeDurabilityStressTest, HeavyLoadDurableMode) {
         const int NUM_RECORDS = 10000000;  // 10M records - stress test
         const int COMMIT_INTERVAL = 100000; // Commit every 100K records
 
+        // NOTE: Memory budgeting is currently disabled because:
+        // 1. The cache uses LRUDeleteNone, so evicted objects aren't freed
+        // 2. Evicting during traversal causes use-after-free on parent nodes
+        // 3. Proper implementation requires reload-from-mmap on cache miss
+        // TODO: Implement proper memory budgeting with lazy reload from mmap
+        // const size_t CACHE_MEMORY_BUDGET = 512 * 1024 * 1024;  // 512 MB
+        // IndexDetails<DataRecord>::setCacheMaxMemory(CACHE_MEMORY_BUDGET);
+        std::cout << "Cache memory budget: unlimited (budgeting disabled for now)\n";
+
         std::cout << "Inserting " << NUM_RECORDS << " clustered points...\n" << std::flush;
         std::cout << "Query range: [" << QUERY_MIN_X << "," << QUERY_MIN_Y
                   << "] to [" << QUERY_MAX_X << "," << QUERY_MAX_Y << "]\n" << std::flush;
@@ -586,7 +595,22 @@ TEST_F(XTreeDurabilityStressTest, HeavyLoadDurableMode) {
         // Collect memory metrics
         size_t memory_after_insert = getMemoryUsage();
         std::cout << "\nMemory footprint: " << StorageMetrics::formatBytes(memory_after_insert) << std::endl;
-        
+
+        // Cache memory stats
+        size_t cache_current = IndexDetails<DataRecord>::getCacheCurrentMemory();
+        size_t cache_max = IndexDetails<DataRecord>::getCacheMaxMemory();
+        auto cache_stats = IndexDetails<DataRecord>::getCache().getStats();
+        std::cout << "\n=== Cache Memory Stats ===" << std::endl;
+        std::cout << "Cache budget: " << StorageMetrics::formatBytes(cache_max)
+                  << (cache_max == 0 ? " (unlimited)" : "") << std::endl;
+        std::cout << "Cache used: " << StorageMetrics::formatBytes(cache_current) << std::endl;
+        std::cout << "Cache entries: " << cache_stats.totalNodes << std::endl;
+        std::cout << "  Pinned: " << cache_stats.totalPinned << std::endl;
+        std::cout << "  Evictable: " << cache_stats.totalEvictable << std::endl;
+        if (cache_stats.totalNodes > 0) {
+            std::cout << "Avg bytes/entry: " << (cache_current / cache_stats.totalNodes) << std::endl;
+        }
+
         // Get segment utilization before storage metrics
         if (store) {
             auto* durable_store = dynamic_cast<persist::DurableStore*>(store);
