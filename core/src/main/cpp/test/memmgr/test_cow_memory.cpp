@@ -47,7 +47,7 @@ protected:
     IndexDetails<DataRecord>* idx;
     DirectMemoryCOWManager<DataRecord>* cow_manager;
     XTreeBucket<DataRecord>* root;
-    LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>* cachedRoot;
+    LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>* cachedRoot;
     vector<const char*>* dimLabels;
     
     void SetUp() override {
@@ -83,7 +83,7 @@ protected:
     }
     
     void TearDown() override {
-        // Since we're using LRUDeleteNone, the cache doesn't own the objects
+        // Since we're using LRUDeleteObject, the cache doesn't own the objects
         // The root bucket was allocated with page-aligned memory and will be cleaned up here
         if (root) {
             // Unregister from COW manager before destroying

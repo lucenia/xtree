@@ -627,11 +627,14 @@ namespace xtree {
          */
         template<typename Record, typename IndexType>
         CacheNode* cache_or_load(IndexType* idx) {
-            // Fast path: already cached
-            if (_cache_ptr) {
-                // CRITICAL FIX: Rewire stale parent pointers for cached buckets
-                // After a split, the parent might have a new _children array
-                // and this cached bucket's _parent might point to the old array
+            // Fast path: If cache has no memory budget, eviction won't happen
+            // so _cache_ptr is always valid (no dangling pointer risk)
+            const bool may_evict = idx->getCache().getMaxMemory() > 0;
+
+            if (_cache_ptr && (!may_evict || !_node_id.valid())) {
+                // Safe to use cached pointer directly:
+                // - No eviction possible (no memory budget), OR
+                // - IN_MEMORY mode (no NodeID, no eviction)
                 if (_cache_ptr->object && !isDataRecord()) {
                     auto* bucket = dynamic_cast<XTreeBucket<Record>*>(_cache_ptr->object);
                     if (bucket && bucket->getParent() != this) {
@@ -639,6 +642,31 @@ namespace xtree {
                     }
                 }
                 return _cache_ptr;
+            }
+
+            // Eviction is possible - must validate via cache lookup
+            // _cache_ptr may be dangling if node was evicted
+            if (_node_id.valid()) {
+                uint64_t cache_key = _node_id.raw();
+
+                // find() returns the cache node if present, nullptr if evicted
+                // This is O(1) and doesn't modify LRU order
+                auto* cn = idx->getCache().find(cache_key);
+
+                if (cn && cn->object) {
+                    // Cache hit - update our cached pointer and return
+                    _cache_ptr = cn;
+                    // Rewire stale parent pointers for cached buckets
+                    if (!isDataRecord()) {
+                        auto* bucket = dynamic_cast<XTreeBucket<Record>*>(cn->object);
+                        if (bucket && bucket->getParent() != this) {
+                            bucket->setParent(this);
+                        }
+                    }
+                    return _cache_ptr;
+                }
+                // Cache miss - clear stale pointer before reload
+                _cache_ptr = nullptr;
             }
 
             // IN_MEMORY mode should always have cache pointers set

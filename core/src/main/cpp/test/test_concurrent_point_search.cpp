@@ -18,7 +18,7 @@
 
 using namespace xtree;
 using namespace std::chrono;
-using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>;
+using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>;
 
 class ConcurrentPointSearchTest : public ::testing::Test {
 protected:

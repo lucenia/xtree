@@ -36,7 +36,7 @@ class XTreeIntegrationTest : public ::testing::Test {
 protected:
     IndexDetails<DataRecord>* idx;
     XTreeBucket<DataRecord>* root;
-    LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>* cachedRoot;
+    LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>* cachedRoot;
     vector<const char*>* dimLabels;
     
     void SetUp() override {

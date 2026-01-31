@@ -241,7 +241,7 @@ class TreeSearchTest : public ::testing::Test {
 protected:
     IndexDetails<DataRecord>* idx;
     XTreeBucket<DataRecord>* root;
-    LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>* cachedRoot;
+    LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>* cachedRoot;
     vector<const char*>* dimLabels;
     
     void SetUp() override {
@@ -258,7 +258,7 @@ protected:
         // For testing, we create a fake cache node that points to our root
         // but isn't actually in the cache. This avoids memory leaks from the
         // static cache persisting between tests.
-        cachedRoot = new LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>(
+        cachedRoot = new LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>(
             idx->getNextNodeID(), static_cast<IRecord*>(root), nullptr);
     }
     

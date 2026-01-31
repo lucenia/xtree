@@ -23,7 +23,7 @@ namespace xtree {
 // Debug helper to count data slots in tree structure
 // Uses a broad search query to ensure we traverse all nodes
 template <class R>
-static size_t count_data_slots_via_iter(XTreeBucket<R>* bkt, LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>* cachedBkt) {
+static size_t count_data_slots_via_iter(XTreeBucket<R>* bkt, LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>* cachedBkt) {
     if (!bkt || !cachedBkt) return 0;
     
     // Create a very broad query that will match everything

@@ -13,7 +13,7 @@
 #include <iostream>
 
 using namespace xtree;
-using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteNone>;
+using CacheNode = LRUCacheNode<IRecord, UniqueId, LRUDeleteObject>;
 
 class RootTrackingTest : public ::testing::Test {
 protected:
