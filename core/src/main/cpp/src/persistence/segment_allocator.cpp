@@ -48,25 +48,30 @@ namespace xtree {
         std::atomic<uint64_t> g_segment_lock_count{0};
         #endif
 
-        SegmentAllocator::SegmentAllocator(const std::string& data_dir) 
+        SegmentAllocator::SegmentAllocator(const std::string& data_dir)
             : data_dir_(data_dir), config_(StorageConfig::defaults()) {
-            // Create internal registries for backward compatibility
-            owned_file_registry_ = std::make_unique<FileHandleRegistry>(config_.max_open_files);
-            owned_mapping_manager_ = std::make_unique<MappingManager>(
-                *owned_file_registry_, 
-                config_.mmap_window_size,
-                8192);       // Max extents
-            
-            file_registry_ = owned_file_registry_.get();
-            mapping_manager_ = owned_mapping_manager_.get();
-            
+            // Use global registries if configured (default), otherwise create owned ones
+            if (config_.use_global_registries) {
+                file_registry_ = &FileHandleRegistry::global();
+                mapping_manager_ = &MappingManager::global();
+            } else {
+                // Create internal registries for backward compatibility
+                owned_file_registry_ = std::make_unique<FileHandleRegistry>(config_.max_open_files);
+                owned_mapping_manager_ = std::make_unique<MappingManager>(
+                    *owned_file_registry_,
+                    config_.mmap_window_size,
+                    8192);       // Max extents
+
+                file_registry_ = owned_file_registry_.get();
+                mapping_manager_ = owned_mapping_manager_.get();
+            }
+
             // Ensure data directory exists
             FSResult dir_result = PlatformFS::ensure_directory(data_dir);
             if (!dir_result.ok) {
                 // Log error but continue - individual file creation will fail later
-                // In production, you might want to throw an exception here
             }
-            
+
             // Initialize allocators for each size class
             // Actual file creation happens lazily on first allocation
         }
@@ -81,17 +86,23 @@ namespace xtree {
             if (!config_.validate()) {
                 throw std::invalid_argument("Invalid storage configuration");
             }
-            
-            // Create internal registries
-            owned_file_registry_ = std::make_unique<FileHandleRegistry>(config_.max_open_files);
-            owned_mapping_manager_ = std::make_unique<MappingManager>(
-                *owned_file_registry_, 
-                config_.mmap_window_size,
-                8192);       // Max extents
-            
-            file_registry_ = owned_file_registry_.get();
-            mapping_manager_ = owned_mapping_manager_.get();
-            
+
+            // Use global registries if configured, otherwise create owned ones
+            if (config_.use_global_registries) {
+                file_registry_ = &FileHandleRegistry::global();
+                mapping_manager_ = &MappingManager::global();
+            } else {
+                // Create internal registries
+                owned_file_registry_ = std::make_unique<FileHandleRegistry>(config_.max_open_files);
+                owned_mapping_manager_ = std::make_unique<MappingManager>(
+                    *owned_file_registry_,
+                    config_.mmap_window_size,
+                    8192);       // Max extents
+
+                file_registry_ = owned_file_registry_.get();
+                mapping_manager_ = owned_mapping_manager_.get();
+            }
+
             // Ensure data directory exists
             FSResult dir_result = PlatformFS::ensure_directory(data_dir);
             if (!dir_result.ok) {
@@ -131,9 +142,14 @@ namespace xtree {
         }
 
         SegmentAllocator::Allocation SegmentAllocator::allocate(size_t size, NodeKind kind) {
+            // Guard: block allocations in read-only mode
+            if (read_only_) {
+                throw std::logic_error("Cannot allocate in read-only mode (serverless reader)");
+            }
+
             uint8_t class_id = size_to_class(size);
             size_t alloc_size = class_to_size(class_id);
-            
+
             auto& allocator = allocators_[class_id];
             std::lock_guard<std::mutex> lock(allocator.mu);
             
@@ -230,10 +246,15 @@ namespace xtree {
             return alloc;
         }
 
-        void SegmentAllocator::free(Allocation& a) { 
+        void SegmentAllocator::free(Allocation& a) {
+            // Guard: block frees in read-only mode
+            if (read_only_) {
+                throw std::logic_error("Cannot free in read-only mode (serverless reader)");
+            }
+
             // First, release the Pin (RAII will handle it, but be explicit)
             a.pin.reset();
-            
+
             if (a.class_id >= NUM_CLASSES || a.length == 0) {
                 return;  // Invalid allocation
             }

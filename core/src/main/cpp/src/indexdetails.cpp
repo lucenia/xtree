@@ -25,7 +25,7 @@
 namespace xtree {
 
 template<class Record>
-void IndexDetails<Record>::initializeDurableStore(const std::string& data_dir) {
+void IndexDetails<Record>::initializeDurableStore(const std::string& data_dir, bool read_only) {
     namespace fs = std::filesystem;
     
     // Create data directory if it doesn't exist
@@ -65,7 +65,8 @@ void IndexDetails<Record>::initializeDurableStore(const std::string& data_dir) {
     
     try {
         // Create the durable runtime which owns all persistence components
-        runtime_ = persist::DurableRuntime::open(paths, policy);
+        // read_only mode: skip WAL replay for fast serverless reader startup
+        runtime_ = persist::DurableRuntime::open(paths, policy, false, read_only);
         
         // Create the durable store context (must outlive DurableStore)
         durable_context_ = std::make_unique<persist::DurableContext>(persist::DurableContext{
@@ -92,7 +93,8 @@ void IndexDetails<Record>::initializeDurableStore(const std::string& data_dir) {
                       << root_id.raw() << "\n";
         }
         
-        std::cout << "[IndexDetails::initializeDurableStore] Durable store initialized successfully\n";
+        std::cout << "[IndexDetails::initializeDurableStore] Durable store initialized"
+                  << (read_only ? " (READ-ONLY mode)" : "") << " successfully\n";
     } catch (const std::exception& e) {
         trace() << "[IndexDetails::initializeDurableStore] Failed to initialize durable store: " 
                   << e.what() << "\n";

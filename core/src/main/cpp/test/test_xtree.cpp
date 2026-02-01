@@ -54,7 +54,7 @@ template<> std::vector<IndexDetails<MockRecord>*> IndexDetails<MockRecord>::inde
 // Provide a minimal implementation of initializeDurableStore for MockRecord
 // This is only used in tests and should never be called since we use IN_MEMORY mode
 template<>
-void IndexDetails<MockRecord>::initializeDurableStore(const std::string& data_dir) {
+void IndexDetails<MockRecord>::initializeDurableStore(const std::string& data_dir, bool /*read_only*/) {
     // Should never be called for test MockRecord which uses IN_MEMORY mode
     throw std::runtime_error("MockRecord should only use IN_MEMORY mode");
 }

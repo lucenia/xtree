@@ -72,12 +72,18 @@ protected:
         // storing data, just testing the checkpoint mechanism
         static uint32_t file_counter = 1;
         static uint64_t offset_counter = 0;
-        
+
         OTAddr addr{file_counter++, 0, offset_counter, static_cast<uint32_t>(size)};
         offset_counter += size;
-        
+
         uint8_t class_id = 0; // Dummy class
-        return ot_->allocate(NodeKind::Leaf, class_id, addr, epoch);
+        NodeID id = ot_->allocate(NodeKind::Leaf, class_id, addr, epoch);
+
+        // IMPORTANT: Must mark entry as live for iterate_live_snapshot() to see it
+        // allocate() leaves birth_epoch = 0 (reserved but not live)
+        ot_->mark_live_commit(id, epoch);
+
+        return id;
     }
     
     // Helper to corrupt a file at specific offset

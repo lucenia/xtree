@@ -438,5 +438,71 @@ void Recovery::cold_start_with_payloads() {
     }
 }
 
+void Recovery::cold_start_readonly() {
+    auto start_time = std::chrono::steady_clock::now();
+
+    // Step 1: Load manifest (tolerate missing/old)
+    bool manifest_loaded = mf_.load();
+    if (!manifest_loaded) {
+        warning() << "Failed to load manifest, continuing with directory scan";
+    }
+
+    // Step 2: Map checkpoint only (skip WAL replay for fast startup)
+    std::string checkpoint_path;
+    uint64_t checkpoint_epoch = 0;
+
+    if (manifest_loaded && !mf_.get_checkpoint().path.empty()) {
+        std::filesystem::path full_path = std::filesystem::path(mf_.get_data_dir()) / mf_.get_checkpoint().path;
+        checkpoint_path = full_path.string();
+    } else {
+        checkpoint_path = OTCheckpoint::find_latest_checkpoint(mf_.get_data_dir());
+    }
+
+    size_t entry_count = 0;
+    const OTCheckpoint::PersistentEntry* entries = nullptr;
+
+    if (!checkpoint_path.empty()) {
+        if (chk_.map_for_read(checkpoint_path, &checkpoint_epoch, &entry_count, &entries)) {
+            for (size_t i = 0; i < entry_count; i++) {
+                const auto& pe = entries[i];
+
+                if (pe.retire_epoch != ~uint64_t{0}) {
+                    continue;  // Skip retired entries
+                }
+
+                ot_.restore_handle(pe.handle_idx, pe);
+            }
+
+            info() << "Read-only recovery: Loaded " << entry_count << " entries from checkpoint epoch "
+                     << checkpoint_epoch;
+        } else {
+            warning() << "Failed to map checkpoint " << checkpoint_path;
+            checkpoint_epoch = 0;
+        }
+    } else {
+        info() << "No checkpoint found for read-only recovery";
+    }
+
+    // Step 3: Skip WAL replay entirely for read-only mode
+    // This provides fast startup for serverless readers
+
+    // Step 4: Read superblock for authoritative (root_id, epoch) snapshot
+    Superblock::Snapshot snapshot;
+    if (sb_.valid()) {
+        snapshot = sb_.load();
+    } else {
+        snapshot = Superblock::Snapshot{ NodeID(), 0 };
+    }
+
+    auto end_time = std::chrono::steady_clock::now();
+    auto recovery_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        end_time - start_time).count();
+
+    info() << "Read-only recovery complete: root_id=" << snapshot.root.raw()
+             << " at checkpoint epoch=" << checkpoint_epoch
+             << " (superblock epoch=" << snapshot.epoch << ")"
+             << " in " << recovery_ms << " ms";
+}
+
 } // namespace persist
 } // namespace xtree

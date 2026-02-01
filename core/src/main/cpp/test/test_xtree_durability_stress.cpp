@@ -17,6 +17,7 @@
 #include "xtree_allocator_traits.hpp"
 #include "persistence/memory_store.h"
 #include "persistence/durable_runtime.h"
+#include "persistence/mapping_manager.h"
 #include <memory>
 #include <filesystem>
 #include <ctime>
@@ -616,6 +617,21 @@ TEST_F(XTreeDurabilityStressTest, HeavyLoadDurableMode) {
             std::cout << "Avg bytes/entry: " << (cache_current / cache_stats.totalNodes) << std::endl;
         }
 
+        // Detailed type analysis
+        auto detailed = IndexDetails<DataRecord>::getCache().getDetailedStats(
+            [](const IRecord* obj) { return obj && obj->isDataNode(); });
+        std::cout << "\n=== Cache Type Breakdown ===" << std::endl;
+        std::cout << "DataRecords: " << detailed.dataRecords
+                  << " (pinned: " << detailed.dataRecordsPinned << ")" << std::endl;
+        std::cout << "Buckets: " << detailed.buckets
+                  << " (pinned: " << detailed.bucketsPinned << ")" << std::endl;
+        std::cout << "Total pin count: " << detailed.totalPinCount << std::endl;
+        std::cout << "Max pin count: " << detailed.maxPinCount << std::endl;
+        if (cache_stats.totalNodes > 0) {
+            std::cout << "Avg pin count: " << std::fixed << std::setprecision(2)
+                      << (double)detailed.totalPinCount / cache_stats.totalNodes << std::endl;
+        }
+
         // Get segment utilization before storage metrics
         if (store) {
             auto* durable_store = dynamic_cast<persist::DurableStore*>(store);
@@ -640,7 +656,24 @@ TEST_F(XTreeDurabilityStressTest, HeavyLoadDurableMode) {
                 std::cout << "Segments < 75% utilized: " << seg_util.segments_under_75_percent << std::endl;
             }
         }
-        
+
+        // MMap memory stats from global MappingManager
+        {
+            auto mmap_stats = persist::MappingManager::global().getStats();
+            std::cout << "\n=== MMap Memory Stats ===" << std::endl;
+            std::cout << "Mapped: " << StorageMetrics::formatBytes(mmap_stats.total_memory_mapped) << std::endl;
+            std::cout << "Budget: " << StorageMetrics::formatBytes(mmap_stats.max_memory_budget)
+                      << (mmap_stats.max_memory_budget == 0 ? " (unlimited)" : "") << std::endl;
+            std::cout << "Extents: " << mmap_stats.total_extents << std::endl;
+            std::cout << "Active pins: " << mmap_stats.total_pins_active << std::endl;
+            std::cout << "Total evictions: " << mmap_stats.evictions_count << std::endl;
+            std::cout << "Total evicted: " << StorageMetrics::formatBytes(mmap_stats.evictions_bytes) << std::endl;
+            if (mmap_stats.max_memory_budget > 0) {
+                std::cout << "Memory utilization: " << std::fixed << std::setprecision(1)
+                          << (mmap_stats.memory_utilization * 100.0) << "%" << std::endl;
+            }
+        }
+
         // Collect storage metrics
         StorageMetrics metrics;
         metrics.analyze(test_dir);
@@ -772,6 +805,16 @@ TEST_F(XTreeDurabilityStressTest, HeavyLoadDurableMode) {
         // Collect memory after recovery
         size_t memory_after_recovery = getMemoryUsage();
         std::cout << "\nPost-recovery memory: " << StorageMetrics::formatBytes(memory_after_recovery) << std::endl;
+
+        // MMap memory stats after recovery
+        {
+            auto mmap_stats = persist::MappingManager::global().getStats();
+            std::cout << "\n=== MMap Stats After Recovery ===" << std::endl;
+            std::cout << "Mapped: " << StorageMetrics::formatBytes(mmap_stats.total_memory_mapped) << std::endl;
+            std::cout << "Extents: " << mmap_stats.total_extents << std::endl;
+            std::cout << "Total evictions: " << mmap_stats.evictions_count << std::endl;
+            std::cout << "Total evicted: " << StorageMetrics::formatBytes(mmap_stats.evictions_bytes) << std::endl;
+        }
 
         // Post-reopen query over same window
         auto* q = new DataRecord(2, 32, "post_reopen_search");
@@ -918,6 +961,380 @@ TEST_F(XTreeDurabilityStressTest, HeavyLoadDurableMode) {
     }
 
     std::cout << "\nDURABLE stress test completed successfully!\n";
+}
+
+/**
+ * Serverless pattern test: Writer creates data, Reader opens read-only
+ * This simulates the serverless deployment pattern where:
+ * 1. A writer process inserts data and commits
+ * 2. A reader process opens the same data in read-only mode (checkpoint only, skip WAL)
+ * 3. Reader should see all committed data and be fast to start
+ */
+TEST_F(XTreeDurabilityStressTest, ServerlessWriterThenReader) {
+    std::cout << "\n=== Serverless Writer/Reader Test ===" << std::endl;
+
+    // Use a unique directory for this test
+    std::string test_dir = "./serverless_test_" + std::to_string(std::time(nullptr));
+    std::filesystem::create_directories(test_dir);
+
+    constexpr int RECORD_COUNT = 1000;
+    std::vector<std::string> expectedIds;
+
+    // Phase 1: WRITER - insert records and commit
+    std::cout << "\nPhase 1: Writer inserting " << RECORD_COUNT << " records..." << std::endl;
+    {
+        std::vector<const char*>* dims = new std::vector<const char*>{"x", "y"};
+        IndexDetails<DataRecord> writer(2, 32, dims, nullptr, nullptr, "serverless_field",
+                                        IndexDetails<DataRecord>::PersistenceMode::DURABLE,
+                                        test_dir, /*read_only=*/false);
+        writer.ensure_root_initialized<DataRecord>();
+
+        auto insert_start = std::chrono::steady_clock::now();
+
+        auto* store = writer.getStore();
+        ASSERT_NE(store, nullptr);
+
+        for (int i = 0; i < RECORD_COUNT; i++) {
+            std::string id = "srv_" + std::to_string(i);
+            expectedIds.push_back(id);
+
+            auto* record = new DataRecord(2, 32, id);
+            std::vector<double> pt = {
+                static_cast<double>(i % 100),
+                static_cast<double>(i / 100)
+            };
+            record->putPoint(&pt);
+
+            writer.root_bucket<DataRecord>()->xt_insert(writer.root_cache_node(), record);
+
+            // Commit every 100 records
+            if ((i + 1) % 100 == 0) {
+                writer.flush_dirty_buckets();
+                store->commit((i + 1) / 100);
+            }
+        }
+        writer.flush_dirty_buckets();
+        store->commit(RECORD_COUNT / 100 + 1);  // Final commit
+
+        auto insert_end = std::chrono::steady_clock::now();
+        auto insert_ms = std::chrono::duration_cast<std::chrono::milliseconds>(insert_end - insert_start).count();
+
+        std::cout << "  Writer inserted " << RECORD_COUNT << " records in " << insert_ms << " ms" << std::endl;
+        std::cout << "  Forcing checkpoint before close (for serverless readers)..." << std::endl;
+
+        // CRITICAL: Force checkpoint before close so readers can recover from checkpoint
+        writer.forceCheckpoint();
+
+        std::cout << "  Closing writer..." << std::endl;
+        writer.close();
+        delete dims;
+    }
+
+    // Phase 2: READER - open read-only (checkpoint only, skip WAL)
+    std::cout << "\nPhase 2: Reader opening in read-only mode..." << std::endl;
+    {
+        auto open_start = std::chrono::steady_clock::now();
+
+        std::vector<const char*>* dims = new std::vector<const char*>{"x", "y"};
+        IndexDetails<DataRecord> reader(2, 32, dims, nullptr, nullptr, "serverless_field",
+                                        IndexDetails<DataRecord>::PersistenceMode::DURABLE,
+                                        test_dir, /*read_only=*/true);
+
+        auto open_end = std::chrono::steady_clock::now();
+        auto open_ms = std::chrono::duration_cast<std::chrono::milliseconds>(open_end - open_start).count();
+
+        std::cout << "  Reader opened in " << open_ms << " ms (should be fast - checkpoint only)" << std::endl;
+        EXPECT_TRUE(reader.isReadOnly()) << "Reader should be in read-only mode";
+
+        // Verify we can read data - root was already recovered during open()
+        // Don't call ensure_root_initialized() - that creates a NEW root
+        // The lazy loading via root_bucket() handles recovered roots
+        auto* bucket = reader.root_bucket<DataRecord>();
+        auto* cacheNode = reader.root_cache_node();
+        EXPECT_NE(bucket, nullptr) << "Reader should have a valid root bucket";
+        EXPECT_NE(cacheNode, nullptr) << "Reader should have a valid cache node";
+
+        // Count records via range query
+        auto* query = new DataRecord(2, 32, "query");
+        std::vector<double> pt1 = {-1.0, -1.0};
+        std::vector<double> pt2 = {101.0, 101.0};
+        query->putPoint(&pt1);
+        query->putPoint(&pt2);
+
+        int found_count = 0;
+        auto* it = bucket->getIterator(cacheNode, query, INTERSECTS);
+        while (it->hasNext()) {
+            auto* rec = it->next();
+            if (rec) found_count++;
+        }
+        delete it;
+
+        std::cout << "  Reader found " << found_count << " records" << std::endl;
+        EXPECT_EQ(found_count, RECORD_COUNT) << "Reader should see all committed records";
+
+        // Verify writes are blocked
+        std::cout << "  Verifying writes are blocked in read-only mode..." << std::endl;
+        bool write_blocked = false;
+        try {
+            auto* record = new DataRecord(2, 32, "should_fail");
+            std::vector<double> pt = {50.0, 50.0};
+            record->putPoint(&pt);
+            bucket->xt_insert(cacheNode, record);
+            delete record;  // Cleanup if we get here
+        } catch (const std::logic_error& e) {
+            write_blocked = true;
+            std::cout << "  Write correctly blocked: " << e.what() << std::endl;
+        }
+        EXPECT_TRUE(write_blocked) << "Writes should be blocked in read-only mode";
+
+        reader.close();
+        delete dims;
+        delete query;
+    }
+
+    // Cleanup
+    std::filesystem::remove_all(test_dir);
+    std::cout << "\nServerless Writer/Reader test completed successfully!" << std::endl;
+}
+
+/**
+ * Multi-field shared memory test
+ * Verifies that multiple IndexDetails share the global MappingManager memory budget
+ */
+TEST_F(XTreeDurabilityStressTest, MultiFieldSharedMemory) {
+    std::cout << "\n=== Multi-Field Shared Memory Test ===" << std::endl;
+
+    // Use a smaller mmap budget to make eviction more visible
+    // Note: The global MappingManager is already initialized, so we just observe
+    auto initial_stats = persist::MappingManager::global().getStats();
+    std::cout << "Initial mmap state: " << initial_stats.total_memory_mapped << " bytes mapped, "
+              << initial_stats.total_extents << " extents" << std::endl;
+
+    std::string base_dir = "./multi_field_test_" + std::to_string(std::time(nullptr));
+
+    constexpr int NUM_FIELDS = 3;
+    constexpr int RECORDS_PER_FIELD = 10;  // Minimal for basic verification
+
+    std::vector<std::unique_ptr<IndexDetails<DataRecord>>> indexes;
+    std::vector<std::vector<const char*>*> dims_list;
+
+    // Create multiple durable indexes (different "fields")
+    std::cout << "\nCreating " << NUM_FIELDS << " durable indexes..." << std::endl;
+    for (int f = 0; f < NUM_FIELDS; f++) {
+        std::string field_dir = base_dir + "/field_" + std::to_string(f);
+        std::filesystem::create_directories(field_dir);
+
+        auto* dims = new std::vector<const char*>{"x", "y"};
+        dims_list.push_back(dims);
+
+        std::string field_name = "field_" + std::to_string(f);
+        auto idx = std::make_unique<IndexDetails<DataRecord>>(
+            2, 32, dims, nullptr, nullptr, field_name,
+            IndexDetails<DataRecord>::PersistenceMode::DURABLE,
+            field_dir, /*read_only=*/false);
+        idx->ensure_root_initialized<DataRecord>();
+        indexes.push_back(std::move(idx));
+    }
+
+    // Insert records into all fields
+    std::cout << "Inserting " << RECORDS_PER_FIELD << " records into each field..." << std::endl;
+    int commit_epoch = 0;
+    for (int i = 0; i < RECORDS_PER_FIELD; i++) {
+        for (int f = 0; f < NUM_FIELDS; f++) {
+            std::string id = "mf_" + std::to_string(f) + "_" + std::to_string(i);
+            auto* record = new DataRecord(2, 32, id);
+            std::vector<double> pt = {
+                static_cast<double>(i % 50 + f * 50),
+                static_cast<double>(i / 50)
+            };
+            record->putPoint(&pt);
+
+            indexes[f]->root_bucket<DataRecord>()->xt_insert(indexes[f]->root_cache_node(), record);
+        }
+
+        // Progress indicator (flush to see output immediately)
+        if ((i + 1) % 5 == 0) {
+            std::cout << "  Inserted " << (i + 1) << " records per field..." << std::flush << std::endl;
+        }
+    }
+
+    // Final flush and commit for each index
+    std::cout << "Committing all indexes..." << std::endl;
+    commit_epoch++;
+    for (auto& idx : indexes) {
+        idx->flush_dirty_buckets();
+        idx->getStore()->commit(commit_epoch);
+    }
+
+    // Check shared memory stats
+    auto mid_stats = persist::MappingManager::global().getStats();
+    std::cout << "\n=== MMap Stats After Insertions ===" << std::endl;
+    std::cout << "Mapped: " << mid_stats.total_memory_mapped << " bytes" << std::endl;
+    std::cout << "Budget: " << mid_stats.max_memory_budget << " bytes" << std::endl;
+    std::cout << "Extents: " << mid_stats.total_extents << std::endl;
+    std::cout << "Evictions: " << mid_stats.evictions_count << std::endl;
+
+    // Verify memory is bounded by budget (if budget is set)
+    if (mid_stats.max_memory_budget > 0) {
+        // Allow some headroom since eviction has hysteresis
+        size_t allowed = static_cast<size_t>(mid_stats.max_memory_budget * 1.15);
+        EXPECT_LE(mid_stats.total_memory_mapped, allowed)
+            << "Memory should be bounded by budget (with headroom)";
+    }
+
+    // Close all indexes
+    std::cout << "\nClosing all indexes..." << std::endl;
+    for (auto& idx : indexes) {
+        idx->close();
+    }
+    indexes.clear();
+
+    auto final_stats = persist::MappingManager::global().getStats();
+    std::cout << "\n=== MMap Stats After Close ===" << std::endl;
+    std::cout << "Mapped: " << final_stats.total_memory_mapped << " bytes" << std::endl;
+    std::cout << "Extents: " << final_stats.total_extents << std::endl;
+    std::cout << "Total evictions: " << final_stats.evictions_count << std::endl;
+    std::cout << "Total evicted bytes: " << final_stats.evictions_bytes << std::endl;
+
+    // Cleanup
+    for (auto* dims : dims_list) {
+        delete dims;
+    }
+    std::filesystem::remove_all(base_dir);
+
+    std::cout << "\nMulti-Field Shared Memory test completed!" << std::endl;
+}
+
+// Stress test: Scale RSS with many fields (serverless simulation)
+TEST_F(XTreeDurabilityStressTest, ServerlessFieldScaling) {
+    std::cout << "\n=== Serverless Field Scaling Test ===" << std::endl;
+    std::cout << "Testing RSS scaling with increasing number of fields" << std::endl;
+
+    std::string base_dir = "./serverless_scaling_" + std::to_string(std::time(nullptr));
+    std::filesystem::create_directories(base_dir);
+
+    // Test parameters - scale up to simulate serverless with many fields
+    constexpr int MAX_FIELDS = 10;
+    constexpr int RECORDS_PER_FIELD = 100;
+
+    std::vector<std::unique_ptr<IndexDetails<DataRecord>>> indexes;
+    std::vector<std::vector<const char*>*> dims_list;
+
+    size_t baseline_rss = getMemoryUsage();
+    std::cout << "Baseline RSS: " << (baseline_rss / (1024*1024)) << " MB" << std::endl;
+
+    std::cout << "\n| Fields | RSS (MB) | Delta (MB) | MMap (MB) | Cache (MB) | Throughput |" << std::endl;
+    std::cout << "|--------|----------|------------|-----------|------------|------------|" << std::endl;
+
+    size_t prev_rss = baseline_rss;
+
+    for (int f = 0; f < MAX_FIELDS; f++) {
+        std::string field_dir = base_dir + "/field_" + std::to_string(f);
+        std::filesystem::create_directories(field_dir);
+
+        auto* dims = new std::vector<const char*>{"x", "y"};
+        dims_list.push_back(dims);
+
+        std::string field_name = "field_" + std::to_string(f);
+        auto idx = std::make_unique<IndexDetails<DataRecord>>(
+            2, 32, dims, nullptr, nullptr, field_name,
+            IndexDetails<DataRecord>::PersistenceMode::DURABLE,
+            field_dir, /*read_only=*/false);
+        idx->ensure_root_initialized<DataRecord>();
+
+        // Insert records
+        auto start = std::chrono::steady_clock::now();
+        for (int i = 0; i < RECORDS_PER_FIELD; i++) {
+            std::string id = "f" + std::to_string(f) + "_r" + std::to_string(i);
+            auto* record = new DataRecord(2, 32, id);
+            std::vector<double> pt = {
+                static_cast<double>(i % 100),
+                static_cast<double>(i / 100)
+            };
+            record->putPoint(&pt);
+            idx->root_bucket<DataRecord>()->xt_insert(idx->root_cache_node(), record);
+        }
+        auto end = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+        double throughput = elapsed_ms > 0 ? (RECORDS_PER_FIELD * 1000.0 / elapsed_ms) : 0;
+
+        // Commit
+        idx->flush_dirty_buckets();
+        idx->getStore()->commit(f + 1);
+
+        indexes.push_back(std::move(idx));
+
+        // Report every field for debugging
+        {
+            size_t current_rss = getMemoryUsage();
+            auto mmap_stats = persist::MappingManager::global().getStats();
+
+            size_t rss_mb = current_rss / (1024*1024);
+            size_t delta_mb = (current_rss - prev_rss) / (1024*1024);
+            size_t mmap_mb = mmap_stats.total_memory_mapped / (1024*1024);
+
+            // Get cache stats (shared global cache)
+            size_t cache_mb = IndexDetails<DataRecord>::getCacheCurrentMemory() / (1024*1024);
+
+            std::cout << "| " << std::setw(6) << (f + 1)
+                      << " | " << std::setw(8) << rss_mb
+                      << " | " << std::setw(10) << delta_mb
+                      << " | " << std::setw(9) << mmap_mb
+                      << " | " << std::setw(10) << cache_mb
+                      << " | " << std::setw(10) << std::fixed << std::setprecision(0) << throughput << " |" << std::endl;
+
+            prev_rss = current_rss;
+        }
+    }
+
+    // Final stats
+    size_t final_rss = getMemoryUsage();
+    auto final_mmap = persist::MappingManager::global().getStats();
+
+    std::cout << "\n=== Final Memory Analysis ===" << std::endl;
+    std::cout << "Total RSS: " << (final_rss / (1024*1024)) << " MB" << std::endl;
+    std::cout << "RSS growth: " << ((final_rss - baseline_rss) / (1024*1024)) << " MB" << std::endl;
+    std::cout << "RSS per field: " << ((final_rss - baseline_rss) / MAX_FIELDS / (1024*1024)) << " MB/field" << std::endl;
+    std::cout << "MMap total: " << (final_mmap.total_memory_mapped / (1024*1024)) << " MB" << std::endl;
+    std::cout << "MMap evictions: " << final_mmap.evictions_count << std::endl;
+
+    // Get cache stats (shared global cache)
+    size_t cache_current = IndexDetails<DataRecord>::getCacheCurrentMemory();
+    size_t cache_max = IndexDetails<DataRecord>::getCacheMaxMemory();
+    std::cout << "Cache used: " << (cache_current / (1024*1024)) << " MB" << std::endl;
+    std::cout << "Cache budget: " << (cache_max / (1024*1024)) << " MB" << std::endl;
+
+    // Calculate overhead
+    size_t mmap_bytes = final_mmap.total_memory_mapped;
+    size_t cache_bytes = cache_current;
+    size_t accounted = mmap_bytes + cache_bytes;
+    size_t unaccounted = (final_rss > baseline_rss + accounted) ?
+                         (final_rss - baseline_rss - accounted) : 0;
+
+    std::cout << "\n=== Memory Breakdown ===" << std::endl;
+    std::cout << "Baseline: " << (baseline_rss / (1024*1024)) << " MB" << std::endl;
+    std::cout << "MMap: " << (mmap_bytes / (1024*1024)) << " MB" << std::endl;
+    std::cout << "Cache: " << (cache_bytes / (1024*1024)) << " MB" << std::endl;
+    std::cout << "Unaccounted overhead: " << (unaccounted / (1024*1024)) << " MB" << std::endl;
+
+    if (unaccounted > 500 * 1024 * 1024) {
+        std::cout << "WARNING: Large unaccounted memory (" << (unaccounted / (1024*1024))
+                  << " MB) - investigate sources!" << std::endl;
+    }
+
+    // Cleanup
+    std::cout << "\nClosing all indexes..." << std::endl;
+    for (auto& idx : indexes) {
+        idx->close();
+    }
+    indexes.clear();
+
+    for (auto* dims : dims_list) {
+        delete dims;
+    }
+    std::filesystem::remove_all(base_dir);
+
+    std::cout << "\nServerless Field Scaling test completed!" << std::endl;
 }
 
 } // namespace xtree

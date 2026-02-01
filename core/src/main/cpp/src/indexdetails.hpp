@@ -76,14 +76,15 @@ namespace xtree {
         IndexDetails( const unsigned short dimension, const unsigned short precision,
                       vector<const char*> *dimLabels, JNIEnv* env, jobject* xtPOJO,
                       const std::string& field_name,  // Required field name for this index
-                      PersistenceMode mode = PersistenceMode::IN_MEMORY, 
-                      const std::string& data_dir = "./xtree_data" ) :
+                      PersistenceMode mode = PersistenceMode::IN_MEMORY,
+                      const std::string& data_dir = "./xtree_data",
+                      bool read_only = false ) :  // read_only: skip WAL, checkpoint-only for serverless readers
             _xtPOJO(xtPOJO), _dimension(dimension), _dimensionLabels(dimLabels),
             _precision(precision), field_name_(field_name),
             // Start _nodeCount high to avoid collision with MemoryStore NodeIDs
             // MemoryStore allocates from 1 upward, so we use a different ID space
-            _nodeCount(1ULL << 48), persistence_mode_(mode), _rootAddress(0),
-            runtime_(nullptr), store_(nullptr) {
+            _nodeCount(1ULL << 48), persistence_mode_(mode), read_only_(read_only),
+            _rootAddress(0), runtime_(nullptr), store_(nullptr) {
 //            cout << "CACHE SIZE: " << _cache.getMaxMemory() << endl;
 
             // retain a handle to the jvm (used for java callbacks)
@@ -95,14 +96,17 @@ namespace xtree {
             // Initialize persistence based on mode
             switch (mode) {
                 case PersistenceMode::IN_MEMORY:
+                    if (read_only) {
+                        throw std::invalid_argument("read_only mode not supported for IN_MEMORY persistence");
+                    }
                     // Create in-memory store
                     memory_store_ = std::make_unique<persist::MemoryStore>();
                     store_ = memory_store_.get();
                     break;
-                    
+
                 case PersistenceMode::DURABLE:
                     // Initialize the new durable store with MVCC and crash recovery
-                    initializeDurableStore(data_dir);
+                    initializeDurableStore(data_dir, read_only);
                     break;
             }
             
@@ -134,11 +138,14 @@ namespace xtree {
         void close() {
             // If we have a durable store, close it properly
             if (store_ && persistence_mode_ == PersistenceMode::DURABLE) {
-                // Flush any pending dirty buckets before final commit
-                flush_dirty_buckets();
+                // Skip flushing and committing in read-only mode
+                if (!read_only_) {
+                    // Flush any pending dirty buckets before final commit
+                    flush_dirty_buckets();
 
-                // Final commit to ensure all data is persisted
-                store_->commit(0);  // Use epoch 0 as final marker
+                    // Final commit to ensure all data is persisted
+                    store_->commit(0);  // Use epoch 0 as final marker
+                }
 
                 // TODO: Add close() to DurableStore to:
                 // - Flush and sync WAL
@@ -580,7 +587,12 @@ namespace xtree {
         PersistenceMode getPersistenceMode() const {
             return persistence_mode_;
         }
-        
+
+        // Check if this index is in read-only mode (serverless reader)
+        bool isReadOnly() const {
+            return read_only_;
+        }
+
         const std::string& getFieldName() const {
             return field_name_;
         }
@@ -604,7 +616,17 @@ namespace xtree {
         bool hasDurableStore() const {
             return persistence_mode_ == PersistenceMode::DURABLE && store_ != nullptr;
         }
-        
+
+        // Force a synchronous checkpoint to ensure all data is checkpointed
+        // Use before close() if readers need to recover from checkpoint (serverless)
+        void forceCheckpoint() {
+            if (hasDurableStore() && runtime_) {
+                flush_dirty_buckets();
+                store_->commit(0);  // Ensure all deltas are in WAL
+                runtime_->coordinator().force_checkpoint();
+            }
+        }
+
         // Helper method to record write operations for tracking
         void recordWrite(void* ptr) {
             // No-op for now, will be handled by store interface
@@ -917,13 +939,14 @@ namespace xtree {
     protected:
 
     private:
-        void initializeDurableStore(const std::string& data_dir);
-        
+        void initializeDurableStore(const std::string& data_dir, bool read_only = false);
+
         static JNIEnv *jvm;
         static vector<IndexDetails<Record>*> indexes;
         
         // Persistence layer
         PersistenceMode persistence_mode_;                 // Track which mode we're in
+        bool read_only_ = false;                           // Read-only mode for serverless readers
         std::string field_name_;                           // Field name for this index (required for multi-field support)
         std::unique_ptr<persist::DurableRuntime> runtime_; // Owns all persistence objects (DURABLE mode)
         std::unique_ptr<persist::MemoryStore> memory_store_; // For IN_MEMORY mode

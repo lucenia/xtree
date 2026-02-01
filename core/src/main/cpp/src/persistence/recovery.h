@@ -30,11 +30,20 @@ namespace xtree {
 
         class Recovery {
         public:
-            Recovery(Superblock& sb, ObjectTableSharded& ot, OTDeltaLog& log, OTCheckpoint& chk, 
+            Recovery(Superblock& sb, ObjectTableSharded& ot, OTDeltaLog& log, OTCheckpoint& chk,
                     Manifest& mf, SegmentAllocator* alloc = nullptr)
                 : sb_(sb), ot_(ot), log_(log), chk_(chk), mf_(mf), alloc_(alloc) {}
-            void cold_start(); // map checkpoint, replay log, set root/epoch
-            void cold_start_with_payloads(); // Enhanced recovery with payload rehydration
+
+            // Full recovery: map checkpoint + replay WAL
+            void cold_start();
+
+            // Enhanced recovery with payload rehydration for EVENTUAL mode
+            void cold_start_with_payloads();
+
+            // Read-only recovery: checkpoint only, skip WAL replay
+            // Fast startup for serverless readers
+            void cold_start_readonly();
+
         private:
             Superblock&  sb_;
             ObjectTableSharded& ot_;

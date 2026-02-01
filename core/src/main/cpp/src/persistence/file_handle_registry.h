@@ -44,6 +44,9 @@ struct FileHandle {
 
 class FileHandleRegistry {
 public:
+    // Global singleton accessor - lazy initialization, thread-safe
+    static FileHandleRegistry& global();
+
     explicit FileHandleRegistry(size_t max_open_files = 256);
     ~FileHandleRegistry();
     

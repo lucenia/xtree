@@ -127,6 +127,10 @@ public:
   
   // Optional: expose a nudge (e.g., called after big bursts)
   void request_checkpoint();
+
+  // Force a synchronous checkpoint (blocks until complete)
+  // Use for clean shutdown to ensure readers can recover from checkpoint
+  void force_checkpoint();
   
   // Update throughput metrics for adaptive rotation
   void update_throughput(uint64_t records_inserted);

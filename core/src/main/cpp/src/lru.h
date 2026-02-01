@@ -95,6 +95,7 @@ namespace xtree {
         }
         inline bool isPinned() const noexcept { return pin_count.load(std::memory_order_relaxed) > 0; }
         static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
+        inline uint32_t getPinCount() const noexcept { return pin_count.load(std::memory_order_relaxed); }
 
         IdType id;
         CachedObjectType* object;
@@ -131,6 +132,7 @@ namespace xtree {
         }
         inline bool isPinned() const noexcept { return pin_count.load(std::memory_order_relaxed) > 0; }
         static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
+        inline uint32_t getPinCount() const noexcept { return pin_count.load(std::memory_order_relaxed); }
 
         IdType id;
         CachedObjectType* object;
@@ -164,6 +166,7 @@ namespace xtree {
         }
         inline bool isPinned() const noexcept { return pin_count.load(std::memory_order_relaxed) > 0; }
         static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
+        inline uint32_t getPinCount() const noexcept { return pin_count.load(std::memory_order_relaxed); }
 
         IdType id;
         CachedObjectType* object;
@@ -197,6 +200,7 @@ namespace xtree {
         }
         inline bool isPinned() const noexcept { return pin_count.load(std::memory_order_relaxed) > 0; }
         static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
+        inline uint32_t getPinCount() const noexcept { return pin_count.load(std::memory_order_relaxed); }
 
         IdType id;
         CachedObjectType* object;
@@ -345,6 +349,17 @@ namespace xtree {
             std::shared_lock<std::shared_mutex> lock(_mtx);
             // Total - evictable = pinned
             return size() - evictableCount();
+        }
+
+        // Iterate over all nodes (for debugging/analysis)
+        template<typename Callback>
+        void forEachNode(Callback callback) const {
+            std::shared_lock<std::shared_mutex> lock(_mtx);
+            Node* cur = _first;
+            while (cur) {
+                callback(cur);
+                cur = cur->next;
+            }
         }
 
     private:

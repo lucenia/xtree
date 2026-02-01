@@ -33,26 +33,32 @@ namespace xtree {
     namespace persist {
 
         std::unique_ptr<DurableRuntime>
-        DurableRuntime::open(const Paths& paths, const CheckpointPolicy& policy, bool use_payload_recovery) {
-        auto rt = std::unique_ptr<DurableRuntime>(new DurableRuntime(paths, policy));
+        DurableRuntime::open(const Paths& paths, const CheckpointPolicy& policy,
+                             bool use_payload_recovery, bool read_only) {
+        auto rt = std::unique_ptr<DurableRuntime>(new DurableRuntime(paths, policy, read_only));
 
-        // Recovery: build OT from latest checkpoint + replay deltas
+        // Recovery: build OT from latest checkpoint + optionally replay deltas
         // Create recovery helper
         OTCheckpoint checkpoint(paths.data_dir);
         OTDeltaLog recovery_log(paths.active_log);
-        Recovery recovery(*rt->superblock_, *rt->ot_sharded_, recovery_log, checkpoint, 
+        Recovery recovery(*rt->superblock_, *rt->ot_sharded_, recovery_log, checkpoint,
                          *rt->manifest_, rt->alloc_.get());
-        
-        // Use enhanced recovery if EVENTUAL mode is enabled
-        if (use_payload_recovery) {
+
+        // Choose recovery mode based on read_only and use_payload_recovery
+        if (read_only) {
+            // Fast startup: checkpoint only, skip WAL replay
+            recovery.cold_start_readonly();
+        } else if (use_payload_recovery) {
+            // Full recovery with payload rehydration for EVENTUAL mode
             recovery.cold_start_with_payloads();
         } else {
+            // Standard full recovery
             recovery.cold_start();
         }
 
         // Load catalog from manifest first (if available)
         rt->load_catalog_from_manifest();
-        
+
         // Then load primary root from superblock (authoritative for "" root)
         auto snapshot = rt->superblock_->load();
         if (snapshot.root.valid()) {
@@ -61,25 +67,35 @@ namespace xtree {
             // Mark not dirty since this is recovered state
             rt->catalog_dirty_.store(false, std::memory_order_release);
         }
-        
+
         // Restore MVCC epoch to the recovered epoch
         // Use O(1) recovery setter - safe because no threads are running yet
         if (snapshot.epoch > 0) {
             rt->mvcc_->recover_set_epoch(snapshot.epoch);
         }
 
-        rt->start();
+        // Only start background coordinator in write mode
+        if (!read_only) {
+            rt->start();
+        }
+
         return rt;
         }
 
-        DurableRuntime::DurableRuntime(Paths p, CheckpointPolicy pol)
-        : paths_(std::move(p)), policy_(pol) {
+        DurableRuntime::DurableRuntime(Paths p, CheckpointPolicy pol, bool read_only)
+        : paths_(std::move(p)), policy_(pol), read_only_(read_only) {
             manifest_   = std::make_unique<Manifest>(paths_.data_dir);
             mvcc_       = std::make_unique<MVCCContext>();
             // Use sharded ObjectTable for concurrent allocation
             // Starts with 1 active shard, grows as needed
             ot_sharded_ = std::make_unique<ObjectTableSharded>(100000, ObjectTableSharded::DEFAULT_NUM_SHARDS);
             alloc_      = std::make_unique<SegmentAllocator>(paths_.data_dir);
+
+            // Set read-only mode on allocator for serverless readers
+            if (read_only_) {
+                alloc_->set_read_only(true);
+            }
+
             superblock_ = std::make_unique<Superblock>(paths_.superblock);
             // Initialize active log to nullptr - coordinator will create/adopt the initial log
             active_log_ = nullptr;
