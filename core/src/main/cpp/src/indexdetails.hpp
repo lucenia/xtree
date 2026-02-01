@@ -31,6 +31,7 @@
 #include "persistence/memory_store.h"
 #include "persistence/store_interface.h"
 #include "xtree_allocator_traits.hpp"  // For XAlloc
+#include "cache_policy.hpp"  // Cache memory policies
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -135,10 +136,10 @@ namespace xtree {
             if (store_ && persistence_mode_ == PersistenceMode::DURABLE) {
                 // Flush any pending dirty buckets before final commit
                 flush_dirty_buckets();
-                
+
                 // Final commit to ensure all data is persisted
                 store_->commit(0);  // Use epoch 0 as final marker
-                
+
                 // TODO: Add close() to DurableStore to:
                 // - Flush and sync WAL
                 // - Close checkpoint files
@@ -146,17 +147,26 @@ namespace xtree {
                 // - Close file handles via FileHandleRegistry
                 // - Clean up segment allocator
             }
-            
+
+            // CRITICAL: Unpin the root before clearing the cache
+            // Otherwise, the root bucket's NodeID remains in the cache,
+            // and the next IndexDetails might try to use it with a different ObjectTable
+            if (root_cn_ && root_cache_key_ != 0) {
+                getCache().unpin(root_cn_, root_cache_key_);
+                root_cn_ = nullptr;
+            }
+
             // Clear the cache to free all cached nodes
             // This should help free DataRecords
             getCache().clear();
-            
+
             // Clear root references
             root_cache_key_ = 0;
-            
+            root_node_id_ = persist::NodeID::invalid();
+
             // Reset store pointer (managed elsewhere)
             store_ = nullptr;
-            
+
             // Note: We don't free the actual tree structure here
             // as it's complex to traverse and free all nodes safely.
             // This is a known limitation that needs future work.
@@ -168,9 +178,10 @@ namespace xtree {
         ~IndexDetails() {
             // Don't delete _dimensionLabels here as it's managed by the caller
             // The caller is responsible for the lifecycle of dimension labels
-            
-            // Clean up is handled by unique_ptrs automatically
-            // Note: close() should be called before destruction for clean shutdown
+
+            // Ensure proper cleanup by calling close()
+            // This unpins the root, clears the cache, and commits data
+            close();
         }
 
         unsigned short getDimensionCount() const {
@@ -217,10 +228,21 @@ namespace xtree {
         void setRootIdentity(uint64_t cache_key, persist::NodeID id,
                            CacheNode* cn,
                            bool persist = true) {
+            // If root is changing, unpin the old root (it's now a regular child)
+            // and pin the new root so it's never evicted
+            if (root_cn_ && root_cn_ != cn && root_cache_key_ != 0) {
+                getCache().unpin(root_cn_, root_cache_key_);
+            }
+
             root_cache_key_ = cache_key;   // still useful (debug/telemetry)
             root_node_id_   = id;          // durable identity
             root_cn_        = cn;          // direct pointer to MRU node
-            
+
+            // Pin the new root so it's never evicted
+            if (cn) {
+                getCache().pin(cn, cache_key);
+            }
+
             // TODO: remove _rootAddress when all callers use root_cache_node()/root_bucket()
             this->_rootAddress = static_cast<long>(cache_key);
             
@@ -312,6 +334,10 @@ namespace xtree {
         void invalidate_root_cache() {
             std::lock_guard<std::mutex> lock(root_init_mutex_);
             if (root_cn_ && root_cn_->object) {
+                // IMPORTANT: Must unpin first, since pinned nodes can't be removed
+                if (root_cache_key_ != 0) {
+                    getCache().unpin(root_cn_, root_cache_key_);
+                }
                 getCache().remove(root_cn_->object);
                 root_cn_ = nullptr;
             }
@@ -356,8 +382,8 @@ namespace xtree {
             const uint64_t key = Alloc::cache_key_for(ref.id, ref.ptr);
             auto* cn = getCache().add(key, static_cast<IRecord*>(ref.ptr));   // registers in MRU list
             assert(cn && "cache.add must return a valid node for root");
-            
-            setRootIdentity(key, ref.id, cn);                            // record identities
+
+            setRootIdentity(key, ref.id, cn);  // record identities (also pins the root)
             Alloc::publish(this, ref.ptr);                               // WAL delta in DURABLE; no-op in memory
             return true;
         }
@@ -428,8 +454,8 @@ namespace xtree {
             const uint64_t key = XAlloc<RecordType>::cache_key_for(stored_root, root_bucket);
             auto* cn = getCache().add(key, reinterpret_cast<IRecord*>(root_bucket));
             if (!cn) return false; // must have an MRU node
-            
-            // Use recovery-safe identity setter that does NOT emit WAL delta
+
+            // Use recovery-safe identity setter that does NOT emit WAL delta (also pins the root)
             setRootIdentity(key, stored_root, cn, /*persist=*/false);
             return true;
         }
@@ -449,6 +475,10 @@ namespace xtree {
             }();
             return *instance;
         }
+
+        // Static storage for cache policy (default is unlimited)
+        static inline std::shared_ptr<CachePolicy> cachePolicy_ =
+            std::make_shared<UnlimitedCachePolicy>();
 
         // Clear the cache - useful for test cleanup to prevent memory leaks
         // When using LRUDeleteNone, this will only delete cache nodes, not the cached objects
@@ -474,6 +504,60 @@ namespace xtree {
         // Returns number of entries evicted
         static size_t evictCacheToMemoryBudget() {
             return getCache().evictToMemoryBudget();
+        }
+
+        // ========== Cache Policy API ==========
+
+        /**
+         * Apply a cache policy to configure memory budget.
+         *
+         * Example usage:
+         *   IndexDetails<Record>::applyCachePolicy(
+         *       std::make_shared<FixedMemoryCachePolicy>(512 * 1024 * 1024));
+         *
+         * Or using factory:
+         *   IndexDetails<Record>::applyCachePolicy(createCachePolicy("512MB"));
+         */
+        static void applyCachePolicy(std::shared_ptr<CachePolicy> policy) {
+            if (policy) {
+                cachePolicy_ = policy;
+                getCache().setMaxMemory(policy->getMaxMemory());
+            }
+        }
+
+        /**
+         * Apply a cache policy from string specification.
+         *
+         * Formats:
+         *   "unlimited"           - No limit
+         *   "512MB" or "1GB"      - Fixed size
+         *   "25%"                 - Percentage of RAM
+         *   "bulk" / "query" / "mixed" / "minimal" - Workload presets
+         *
+         * Returns true if policy was applied successfully.
+         */
+        static bool applyCachePolicy(const std::string& spec) {
+            auto policy = createCachePolicy(spec);
+            if (policy) {
+                applyCachePolicy(policy);
+                return true;
+            }
+            return false;
+        }
+
+        /**
+         * Get the currently active cache policy.
+         */
+        static std::shared_ptr<CachePolicy> getCachePolicy() {
+            return cachePolicy_;
+        }
+
+        /**
+         * Initialize cache policy from XTREE_CACHE_POLICY environment variable.
+         * Call this once at startup if you want environment-based configuration.
+         */
+        static void initCachePolicyFromEnv() {
+            applyCachePolicy(getDefaultCachePolicy());
         }
 
         void updateDetails(unsigned short precision,
@@ -594,19 +678,145 @@ namespace xtree {
                     // If bucket was reallocated, update the parent's reference AND mark parent dirty
                     if (pub_result.id.valid() && pub_result.id != old_id) {
                         bucket->setNodeID(pub_result.id);
+
+                        // CRITICAL FIX: Update all in-memory children's _parent_node_id
+                        // When this bucket is reallocated, its children still have the old
+                        // parent NodeID. If those children are later reallocated, they would
+                        // try to find their parent using the stale NodeID (which was freed).
+                        if (bucket->getChildren()) {
+                            for (auto* kn : *bucket->getChildren()) {
+                                if (kn && !kn->isDataRecord()) {
+                                    // Try to find the child bucket in cache
+                                    persist::NodeID child_id = kn->getNodeID();
+                                    if (child_id.valid()) {
+                                        auto* child_cn = getCache().find(child_id.raw());
+                                        if (child_cn && child_cn->object) {
+                                            auto* childBucket = dynamic_cast<XTreeBucket<Record>*>(child_cn->object);
+                                            if (childBucket) {
+                                                childBucket->setParentNodeID(pub_result.id);
+#ifndef NDEBUG
+                                                trace() << "[REALLOC_CASCADE] Updated child " << child_id.raw()
+                                                          << "'s _parent_node_id: " << old_id.raw()
+                                                          << " -> " << pub_result.id.raw() << std::endl;
+#endif
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
 #ifndef NDEBUG
                         trace() << "[REALLOC_CASCADE] Bucket " << old_id.raw() << " -> " << pub_result.id.raw()
                                   << " (isLeaf=" << bucket->getIsLeaf() << ")"
-                                  << " hasParent=" << (bucket->getParent() != nullptr)
-                                  << " parentBucket=" << (bucket->parent_bucket() ? bucket->parent_bucket()->getNodeID().raw() : 0)
+                                  << " parentNodeID=" << bucket->getParentNodeID().raw()
                                   << std::endl;
 #endif
-                        if (bucket->getParent()) {
-                            bucket->getParent()->setNodeID(pub_result.id);
+                        // Use _parent_node_id as source of truth for whether bucket has a parent.
+                        // WARNING: bucket->getParent() may be dangling if parent was evicted!
+                        // The raw _parent pointer points to a _MBRKeyNode that was deleted with parent.
+                        if (bucket->getParentNodeID().valid()) {
+                            // This bucket has a parent - find or reload it
+                            uint64_t parent_key = bucket->getParentNodeID().raw();
+                            auto* parent_cn = getCache().find(parent_key);
+                            XTreeBucket<Record>* parentBucket = nullptr;
 
-                            // CRITICAL FIX: Mark the parent bucket dirty since its child reference changed
-                            // Without this, the parent's wire format would still have the old child NodeID
-                            auto* parentBucket = bucket->parent_bucket();
+                            if (parent_cn && parent_cn->object) {
+                                // Parent still in cache - update its child reference
+                                parentBucket = dynamic_cast<XTreeBucket<Record>*>(parent_cn->object);
+#ifndef NDEBUG
+                                trace() << "[REALLOC_CASCADE] Found parent in cache: NodeID=" << parent_key
+                                          << " parentAddr=" << (void*)parentBucket << std::endl;
+#endif
+
+                                // CRITICAL FIX: Use bucket->getParent() directly if valid.
+                                // This is the exact _MBRKeyNode that was set by setParent().
+                                // Since parent is still in cache, _parent pointer is valid.
+                                auto* directParentKN = bucket->getParent();
+                                if (directParentKN && bucket->parent_bucket() == parentBucket) {
+                                    // Direct update via _parent pointer - most reliable
+                                    directParentKN->setNodeID(pub_result.id);
+#ifndef NDEBUG
+                                    trace() << "[REALLOC_CASCADE] Updated via _parent pointer: "
+                                              << old_id.raw() << " -> " << pub_result.id.raw()
+                                              << " kn_addr=" << (void*)directParentKN << std::endl;
+#endif
+                                } else if (parentBucket && parentBucket->getChildren()) {
+                                    // Fallback: search through _children (may fail if NodeID mismatch)
+                                    bool found_child = false;
+                                    for (auto* kn : *parentBucket->getChildren()) {
+                                        if (kn && kn->getNodeID() == old_id) {
+                                            kn->setNodeID(pub_result.id);
+                                            found_child = true;
+#ifndef NDEBUG
+                                            trace() << "[REALLOC_CASCADE] Updated parent " << parentBucket->getNodeID().raw()
+                                                      << " child ref: " << old_id.raw() << " -> " << pub_result.id.raw() << std::endl;
+#endif
+                                            break;
+                                        }
+                                    }
+#ifndef NDEBUG
+                                    if (!found_child) {
+                                        auto* children = parentBucket->getChildren();
+                                        trace() << "[REALLOC_CASCADE] WARNING: Child " << old_id.raw()
+                                                  << " NOT FOUND in parent " << parentBucket->getNodeID().raw()
+                                                  << " (children_size=" << (children ? children->size() : 0)
+                                                  << ", isLeaf=" << parentBucket->getIsLeaf() << ")"
+                                                  << " directParentKN=" << (void*)directParentKN
+                                                  << " directOwner=" << (void*)bucket->parent_bucket()
+                                                  << std::endl;
+                                    }
+#endif
+                                }
+                            } else {
+                                // Parent was evicted - reload from disk
+                                persist::NodeBytes parent_bytes = store_->read_node(bucket->getParentNodeID());
+                                if (parent_bytes.data && parent_bytes.size > 0) {
+                                    // Create new bucket and deserialize from wire format
+                                    parentBucket = new XTreeBucket<Record>(this, /*isRoot*/false);
+                                    parentBucket->setNodeID(bucket->getParentNodeID());
+                                    parentBucket->from_wire(
+                                        static_cast<const uint8_t*>(parent_bytes.data), this
+                                    );
+                                    // Update child reference in freshly loaded parent
+                                    if (parentBucket->getChildren()) {
+                                        for (auto* kn : *parentBucket->getChildren()) {
+                                            if (kn && kn->getNodeID() == old_id) {
+                                                kn->setNodeID(pub_result.id);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    // Add to cache
+                                    auto cache_result = getCache().acquirePinned(parent_key, parentBucket);
+                                    parent_cn = cache_result.node;
+                                    // If already in cache, we have duplicate - delete our loaded copy
+                                    // BUT ALSO update the existing parent's child reference!
+                                    if (!cache_result.created && cache_result.node && cache_result.node->object != parentBucket) {
+                                        // The parent was already in cache - update ITS child reference too!
+                                        auto* existingParent = dynamic_cast<XTreeBucket<Record>*>(cache_result.node->object);
+                                        if (existingParent && existingParent->getChildren()) {
+                                            for (auto* kn : *existingParent->getChildren()) {
+                                                if (kn && kn->getNodeID() == old_id) {
+                                                    kn->setNodeID(pub_result.id);
+#ifndef NDEBUG
+                                                    trace() << "[REALLOC_CASCADE] Updated existing cached parent's child ref: "
+                                                              << old_id.raw() << " -> " << pub_result.id.raw() << std::endl;
+#endif
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                        delete parentBucket;
+                                        parentBucket = existingParent;
+                                    }
+#ifndef NDEBUG
+                                    trace() << "[REALLOC_CASCADE] Reloaded evicted parent "
+                                              << bucket->getParentNodeID().raw() << " from store"
+                                              << std::endl;
+#endif
+                                }
+                            }
+
                             if (parentBucket) {
                                 // IMPORTANT: Clear enlisted flag first, then re-mark dirty.
                                 // If parent was already in this batch (already enlisted), markDirty()
@@ -614,6 +824,29 @@ namespace xtree {
                                 // ensure parent gets added to the NEXT iteration's dirty list.
                                 parentBucket->clearEnlistedFlag();
                                 parentBucket->markDirty();
+
+                                // CRITICAL FIX: Explicitly pin the parent bucket NOW.
+                                // The initial markDirty() might not have pinned because the bucket
+                                // wasn't in cache yet. And if already dirty, markDirty() skips pinning.
+                                // We must ensure the parent stays in cache until it's flushed with
+                                // the updated child reference.
+                                if (parent_cn && !parentBucket->isDirtyPinned()) {
+                                    getCache().pin(parent_cn, parent_key);
+                                    parentBucket->setDirtyPinned(true);
+#ifndef NDEBUG
+                                    trace() << "[REALLOC_CASCADE] Explicitly pinned parent "
+                                              << parentBucket->getNodeID().raw() << std::endl;
+#endif
+                                }
+#ifndef NDEBUG
+                                else {
+                                    trace() << "[REALLOC_CASCADE] Skip explicit pin for parent "
+                                              << parentBucket->getNodeID().raw()
+                                              << " (parent_cn=" << (parent_cn ? "valid" : "null")
+                                              << ", isDirtyPinned=" << parentBucket->isDirtyPinned() << ")"
+                                              << std::endl;
+                                }
+#endif
 #ifndef NDEBUG
                                 trace() << "[REALLOC_CASCADE] Marked parent " << parentBucket->getNodeID().raw()
                                           << " dirty (isRoot=" << (parentBucket->getParent() == nullptr) << ")"
@@ -765,7 +998,11 @@ namespace xtree {
 
             // If root already in cache, evict it first to prevent leaks
             // cache.remove() will delete the old bucket via LRUDeleteObject policy
+            // IMPORTANT: Must unpin first, since pinned nodes can't be removed
             if (root_cn_ && root_cn_->object) {
+                if (root_cache_key_ != 0) {
+                    getCache().unpin(root_cn_, root_cache_key_);
+                }
                 getCache().remove(root_cn_->object);
                 root_cn_ = nullptr;
             }
@@ -784,6 +1021,9 @@ namespace xtree {
                 delete bucket;
                 throw std::runtime_error("Failed to add root to cache");
             }
+
+            // CRITICAL: Pin the root so it's never evicted. The root must always be in cache.
+            getCache().pin(root_cn_, root_cache_key_);
         }
         
         // create the cache for the tree

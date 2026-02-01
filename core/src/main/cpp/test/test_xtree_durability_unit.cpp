@@ -474,9 +474,9 @@ TEST_F(XTreeDurabilityUnitTest, ParentNodeIDUpdatedOnRealloc) {
     std::cout << "Initial root NodeID: " << initial_root_id.raw() << std::endl;
 
     // Insert many records to force bucket growth and splits
-    std::vector<DataRecord*> records;
     for (int i = 0; i < 100; ++i) {
-        DataRecord* record = new DataRecord(2, 16, "row_" + std::to_string(i));
+        std::string rowId = "row_" + std::to_string(i);
+        DataRecord* record = XAlloc<DataRecord>::allocate_record(&idx, 2, 32, rowId);
 
         // Add points to the record
         std::vector<double> point = {
@@ -484,13 +484,12 @@ TEST_F(XTreeDurabilityUnitTest, ParentNodeIDUpdatedOnRealloc) {
         };
         record->putPoint(&point);
         record->putPoint(&point);  // Add twice to create an MBR
-        records.push_back(record);
 
         // Insert into tree using public API
         root->xt_insert(idx.root_cache_node(), record);
     }
 
-    std::cout << "Inserted " << records.size() << " records" << std::endl;
+    std::cout << "Inserted 100 records" << std::endl;
 
     // Get the root after insertions (might have changed due to splits)
     root = idx.root_bucket<DataRecord>();
@@ -533,17 +532,11 @@ TEST_F(XTreeDurabilityUnitTest, ParentNodeIDUpdatedOnRealloc) {
         << "Full tree should have consistent parent-child NodeID relationships";
 #endif
 
-    std::cout << "✓ Tree remains valid after " << records.size()
-              << " insertions with potential reallocations" << std::endl;
+    std::cout << "✓ Tree remains valid after 100 insertions with potential reallocations" << std::endl;
 #ifndef NDEBUG
     std::cout << "✓ Parent-child NodeID consistency verified (debug build)" << std::endl;
     std::cout << "✓ Full tree consistency verified (debug build)" << std::endl;
 #endif
-
-    // Clean up
-    for (auto* rec : records) {
-        delete rec;  // KeyMBR is deleted by DataRecord destructor
-    }
 }
 
 } // namespace xtree

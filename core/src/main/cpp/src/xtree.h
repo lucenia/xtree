@@ -253,18 +253,22 @@ namespace xtree {
          */
         template<typename IndexType>
         IRecord* getRecord(IndexType* idx) {
-            // Fast path: already have the pointer cached
-            if (_cache_ptr) {
+            // SAFETY: When eviction is possible, _cache_ptr may be dangling.
+            // Skip fast path and use NodeID resolution instead.
+            const bool may_evict = idx && idx->getCache().getMaxMemory() > 0;
+
+            // Fast path: already have the pointer cached (only when eviction disabled)
+            if (!may_evict && _cache_ptr) {
                 return _cache_ptr->object;
             }
-            
+
             // DURABLE mode: resolve NodeID to get the bucket pointer
             // Use overload resolution to handle types with/without getStore()
             // Debug: NodeID resolution
             if (_node_id.valid() && idx) {
                 return getRecordImpl(idx, 0);
             }
-            
+
             // Fallback for types without getStore() or when NodeID is invalid
             return nullptr;
         }
@@ -336,16 +340,40 @@ namespace xtree {
                         // This is an XTreeBucket - handle as before
                         auto* bucket = new XTreeBucket<RecordType>(idx, /*isRoot*/false);
                         bucket->setNodeID(_node_id);
-                        
+
                         // Deserialize from wire format
                         bucket->from_wire(reinterpret_cast<const uint8_t*>(node_bytes.data), idx);
-                        
-                        // Now set the key in this __MBRKeyNode to the child's key
-                        // so parent can use it for traversal decisions
-                        _recordKey = bucket->getKey();
-                        
-                        // Add to the LRU cache
-                        _cache_ptr = idx->getCache().add(_node_id.raw(), reinterpret_cast<IRecord*>(bucket));
+
+                        // Use acquirePinned to safely handle already-cached case
+                        // This returns existing node if present, or creates new entry
+                        uint64_t cache_key = _node_id.raw();
+                        auto result = idx->getCache().acquirePinned(cache_key, reinterpret_cast<IRecord*>(bucket));
+                        _cache_ptr = result.node;
+
+                        // If the cache already had this node, we loaded a duplicate - delete it
+                        if (!result.created && _cache_ptr && _cache_ptr->object != bucket) {
+                            delete bucket;
+                            bucket = dynamic_cast<XTreeBucket<RecordType>*>(_cache_ptr->object);
+                            if (!bucket) {
+                                return nullptr;  // Should not happen
+                            }
+                        }
+
+                        // CRITICAL: Create an OWNED copy of the child's MBR so that
+                        // eviction of the child bucket doesn't leave the parent with
+                        // a dangling _recordKey pointer. This is essential for
+                        // memory-budgeted eviction to work correctly.
+                        if (_owns_key && _recordKey) {
+                            delete _recordKey;
+                        }
+                        _recordKey = new KeyMBR(*bucket->getKey());
+                        _owns_key = true;
+                        setLeaf(bucket->getIsLeaf());
+
+                        // Unpin the node - acquirePinned returns pinned
+                        if (_cache_ptr) {
+                            idx->getCache().unpin(_cache_ptr, cache_key);
+                        }
 
                         return reinterpret_cast<IRecord*>(bucket);
                     }
@@ -364,44 +392,72 @@ namespace xtree {
 
         // Sets the record
         // Not thread-safe; caller must synchronize with readers.
-        inline void setRecord(CacheNode* record) noexcept {
+        // Note: May allocate for owned MBR copy in durable mode (can throw std::bad_alloc)
+        inline void setRecord(CacheNode* record) {
             // If a durable child is already set, do not touch flags or key/aliasing.
             // Durable attach is final for the key/NodeID; use clearDurableChild() first if you need to replace.
             if (_node_id.valid() && _owns_key && _recordKey) {
                 return;
             }
-            
-#ifndef NDEBUG
-            // If we ever arrive here owning a key, something upstream is wrong.
-            assert(!_owns_key && "_owns_key unexpectedly true in setRecord(); "
-                                 "use setDurableChild() for durable path");
-#endif
-            
+
             if (!record || !record->object) {
                 _cache_ptr = nullptr;
                 return; // durable path must have set _recordKey/_node_id already
             }
-            
+
             _cache_ptr = record;
-            
+
             const bool child_is_data = record->object->isDataNode();
             setDataRecord(child_is_data);
-            
-            // Non-durable path: alias the child's key; we do NOT own it.
-            // IMPORTANT: getKey() returns a non-owning pointer; lifetime >= this node.
-            _recordKey = record->object->getKey();
-            _owns_key  = false;
-            
-            // Opportunistic NodeID capture
-            // TODO: Replace dynamic_cast with virtual node_id_if_any() for hot path optimization
+
+            // Capture NodeID from the child if available
+            persist::NodeID captured_nid = persist::NodeID::invalid();
+            bool is_leaf_bucket = false;
             if (child_is_data) {
                 if (auto* data = dynamic_cast<DataRecord*>(record->object); data && data->hasNodeID())
-                    _node_id = data->getNodeID();
+                    captured_nid = data->getNodeID();
             } else {
-                if (auto* b = dynamic_cast<XTreeBucket<RecordType>*>(record->object); b && b->hasNodeID())
-                    _node_id = b->getNodeID();
+                if (auto* b = dynamic_cast<XTreeBucket<RecordType>*>(record->object); b) {
+                    if (b->hasNodeID()) captured_nid = b->getNodeID();
+                    is_leaf_bucket = b->getIsLeaf();
+                }
             }
-            
+
+            // CRITICAL: For ALL bucket children, we must create an OWNED copy of the MBR.
+            // This ensures that if the child bucket is evicted from cache, the parent
+            // still has a valid MBR for traversal. Without this, eviction causes
+            // use-after-free in sort comparators (SortKeysByAreaEnlargement etc).
+            //
+            // Note: We can't check if eviction is enabled here (no IndexDetails access),
+            // so we always own MBRs for buckets. The overhead is minimal since KeyMBRs
+            // are small (dimension*2 floats, typically ~16-64 bytes).
+            //
+            // DataRecords are NOT owned here because they're deleted immediately after
+            // persist (zero heap retention), so the alias is never used.
+            if (!child_is_data) {
+                // Bucket child - ALWAYS own the MBR
+                if (_owns_key && _recordKey) {
+                    delete _recordKey;
+                }
+                _recordKey = new KeyMBR(*record->object->getKey());
+                _owns_key = true;
+                _node_id = captured_nid;
+                setLeaf(is_leaf_bucket);
+#ifndef NDEBUG
+                // Debug: verify bucket child owns its MBR
+                if (captured_nid.valid()) {
+                    trace() << "[setRecord] Bucket child NodeID=" << captured_nid.raw()
+                          << " _owns_key=" << _owns_key
+                          << " _recordKey=" << (void*)_recordKey << std::endl;
+                }
+#endif
+            } else {
+                // DataRecord: alias the child's key (transient - deleted immediately)
+                _recordKey = record->object->getKey();
+                _owns_key = false;
+                _node_id = captured_nid;
+            }
+
 #ifndef NDEBUG
             _check_invariant();
 #endif
@@ -473,6 +529,10 @@ namespace xtree {
             setLeaf(leafFlag);     // Set the leaf flag for bucket children
 
 #ifndef NDEBUG
+            trace() << "[setDurableBucketChild] NodeID=" << nid.raw()
+                  << " _owns_key=" << _owns_key
+                  << " _recordKey=" << (void*)_recordKey
+                  << " _kn_addr=" << (void*)this << std::endl;
             assert(_node_id.valid() && "Durable bucket child must have valid NodeID");
             assert(_recordKey && "Durable bucket child must have copied key");
             assert(_owns_key && "Durable bucket child must own its key");
@@ -782,8 +842,19 @@ namespace xtree {
             }
 
             // Set the key reference if needed (for MBR-based filtering)
+            // CRITICAL: For buckets, we must OWN the MBR to survive eviction.
+            // DataRecords are transient (deleted after persist), so aliasing is OK.
             if (!_recordKey && _cache_ptr && _cache_ptr->object) {
-                _recordKey = _cache_ptr->object->getKey();
+                const bool child_is_bucket = !_cache_ptr->object->isDataNode();
+                if (child_is_bucket) {
+                    // Bucket child - create OWNED copy to survive eviction
+                    _recordKey = new KeyMBR(*_cache_ptr->object->getKey());
+                    _owns_key = true;
+                } else {
+                    // DataRecord - alias is safe (transient)
+                    _recordKey = _cache_ptr->object->getKey();
+                    _owns_key = false;
+                }
             }
 
             return _cache_ptr;
@@ -885,6 +956,10 @@ namespace xtree {
         // Explicit ownership flag: true iff we own _recordKey (must delete it)
         // False means _recordKey is an alias to external memory (don't delete)
         bool _owns_key = false;  // Default member init
+
+    public:
+        // Accessor for ownership flag (for debug checks)
+        bool ownsKey() const noexcept { return _owns_key; }
 
         unsigned short size(const unsigned short &mbrBytes)  { 
             return mbrBytes + sizeof(bool) + sizeof(XTreeBucket<RecordType>*) + sizeof(unsigned char);
@@ -1070,14 +1145,15 @@ namespace xtree {
             unsigned int sourceN = 0
         ) 
             : IRecord(key),
-              _memoryUsage(sizeof(XTreeBucket<Record>)), 
-              _idx(idx), 
-              _parent(NULL), 
-              _nextChild(NULL), 
+              _memoryUsage(sizeof(XTreeBucket<Record>)),
+              _idx(idx),
+              _parent(NULL),
+              _parent_node_id(persist::NodeID::invalid()),
+              _nextChild(NULL),
               _prevChild(NULL),
-              _n(0), 
-              _isSupernode(false), 
-              _leaf(isLeaf), 
+              _n(0),
+              _isSupernode(false),
+              _leaf(isLeaf),
               _ownsPreallocatedNodes(sourceChildren==NULL),
               _bucket_node_id(persist::NodeID::invalid()),
               _dirty(false),
@@ -1319,8 +1395,31 @@ namespace xtree {
             // The parent KN stores the child's NodeID as its reference.
 #endif
             _parent = parent;
+            // Record parent bucket's NodeID for cache-resilient cascading updates.
+            // When parent is evicted, we can use this to reload it.
+            if (parent && parent->_owner) {
+                _parent_node_id = parent->_owner->getNodeID();
+#ifndef NDEBUG
+                trace() << "[setParent] child NodeID=" << this->getNodeID().raw()
+                          << " -> parent NodeID=" << _parent_node_id.raw() << std::endl;
+#endif
+            } else {
+                _parent_node_id = persist::NodeID::invalid();
+#ifndef NDEBUG
+                if (parent) {
+                    trace() << "[setParent] child NodeID=" << this->getNodeID().raw()
+                              << " parent _owner is null" << std::endl;
+                }
+#endif
+            }
         }
         _MBRKeyNode* getParent() const { return _parent; }
+        persist::NodeID getParentNodeID() const { return _parent_node_id; }
+
+        // Update the parent NodeID (used when parent bucket is reallocated)
+        void setParentNodeID(persist::NodeID new_parent_id) {
+            _parent_node_id = new_parent_id;
+        }
 
         // print out this bucket for logging
         string toString(int indentLevel=0) {
@@ -1421,13 +1520,21 @@ namespace xtree {
                         assert(false && "Parent cannot reference itself as a child");
                     }
 
-                    // Debug output for child insertion (always runs, even in Release mode)
+                    // Debug output for child insertion (always runs)
+#ifndef NDEBUG
                     trace() << "[INSERT_CHILD] parent=" << parentId.raw()
-                              << " child=" << bucketId.raw()
-                              << " leaf=" << bucket->isLeaf() << std::endl;
+                          << " parentAddr=" << (void*)this
+                          << " child=" << bucketId.raw()
+                          << " leaf=" << bucket->isLeaf() << std::endl;
+#endif
 
                     // Parity check removed - type will be validated via ObjectTable metadata (Phase 4)
                     child->setNodeID(bucketId);
+#ifndef NDEBUG
+                    trace() << "[KN_SETID] parent=" << parentId.raw()
+                          << " kn_addr=" << (void*)child
+                          << " child_nid=" << bucketId.raw() << std::endl;
+#endif
 
                     // Verify the write
                     assert(child->getNodeID().raw() == bucketId.raw() &&
@@ -1522,6 +1629,36 @@ namespace xtree {
                 } else {
                     // Bucket child path - use bucket-specific setter
                     child->setDurableBucketChild(*key, src.getNodeID(), src.getLeaf());
+
+                    // CRITICAL FIX: If the bucket is in cache, rewire its _parent to point to
+                    // this new KN. Otherwise REALLOC_CASCADE will only update the OLD KN
+                    // (the one _parent pointed to before), leaving this new KN stale.
+                    //
+                    // In DURABLE mode, src.getCacheRecord() is often null (intentionally).
+                    // So we must look up the bucket from cache directly using its NodeID.
+                    if (_idx && _idx->hasDurableStore() && src.hasNodeID()) {
+                        auto& cache = _idx->getCache();
+                        auto* cn = cache.find(src.getNodeID().raw());
+                        if (cn && cn->object) {
+                            auto* bucket = static_cast<XTreeBucket<Record>*>(cn->object);
+                            bucket->setParent(child);
+#ifndef NDEBUG
+                            trace() << "[kn_from_entry] Rewired _parent for bucket "
+                                  << src.getNodeID().raw() << " to new KN " << (void*)child
+                                  << " in parent " << this->getNodeID().raw() << std::endl;
+#endif
+                        }
+                    } else if (auto* cn = const_cast<_MBRKeyNode&>(src).getCacheRecord()) {
+                        if (cn->object) {
+                            auto* bucket = static_cast<XTreeBucket<Record>*>(cn->object);
+                            bucket->setParent(child);
+#ifndef NDEBUG
+                            trace() << "[kn_from_entry] Rewired _parent for bucket "
+                                  << src.getNodeID().raw() << " to new KN " << (void*)child
+                                  << " in parent " << this->getNodeID().raw() << std::endl;
+#endif
+                        }
+                    }
                 }
 
 #ifndef NDEBUG
@@ -1870,9 +2007,14 @@ namespace xtree {
                     auto* owned_mbr = new KeyMBR(child_mbr);
                     kn->setKey(owned_mbr);
                     kn->_owns_key = true;
-                    
+
                     if (raw != 0) {
                         kn->setNodeID(persist::NodeID::from_raw(raw));
+#ifndef NDEBUG
+                        trace() << "[from_wire] Bucket child NodeID=" << raw
+                              << " _owns_key=" << kn->_owns_key
+                              << " _recordKey=" << (void*)kn->getKey() << std::endl;
+#endif
                     } else if (durable) {
                         // Bucket without NodeID in durable mode is an error
                         std::string err = "from_wire: Bucket child " + std::to_string(i) +
@@ -2021,19 +2163,62 @@ namespace xtree {
         
         // Check if bucket is dirty (needs persistence)
         bool isDirty() const { return _dirty; }
+
+        // Check if this bucket was pinned by markDirty()
+        bool isDirtyPinned() const { return _dirty_pinned; }
+
+        // Set the dirty-pinned flag (for explicit pinning in flush_dirty_buckets)
+        void setDirtyPinned(bool pinned) { _dirty_pinned = pinned; }
         
-        // Clear dirty flag after publishing
-        void clearDirty() { _dirty = false; }
-        
-        // Mark this bucket as dirty (needs persistence) and auto-register
-        void markDirty() { 
+        // Clear dirty flag after publishing and unpin the bucket (if we pinned it)
+        void clearDirty() {
+            // Only unpin if we pinned it during markDirty()
+            if (_dirty_pinned && _idx && _bucket_node_id.valid()) {
+                uint64_t key = _bucket_node_id.raw();
+                auto* cn = _idx->getCache().find(key);
+                if (cn) {
+                    _idx->getCache().unpin(cn, key);
+                }
+                _dirty_pinned = false;
+            }
+            _dirty = false;
+        }
+
+        // Mark this bucket as dirty (needs persistence), auto-register, and pin
+        void markDirty() {
             if (!_dirty) {
                 _dirty = true;
                 // Auto-register with IndexDetails for batch publishing
-                if (_idx && _idx->hasDurableStore() && 
+                if (_idx && _idx->hasDurableStore() &&
                     _idx->getPersistenceMode() == IndexDetails<Record>::PersistenceMode::DURABLE) {
                     _idx->register_dirty_bucket(this);
+
+                    // CRITICAL: Pin this bucket so it's not evicted while dirty.
+                    // Dirty buckets haven't been committed to the durable store yet,
+                    // so evicting them would cause failures on reload.
+                    if (_bucket_node_id.valid()) {
+                        uint64_t key = _bucket_node_id.raw();
+                        auto* cn = _idx->getCache().find(key);
+                        if (cn) {
+                            _idx->getCache().pin(cn, key);
+                            _dirty_pinned = true;  // Track that we pinned
+#ifndef NDEBUG
+                            trace() << "[markDirty] Pinned bucket NodeID=" << _bucket_node_id.raw() << std::endl;
+#endif
+                        } else {
+#ifndef NDEBUG
+                            trace() << "[markDirty] WARNING: Bucket NodeID=" << _bucket_node_id.raw()
+                                      << " not found in cache (can't pin)" << std::endl;
+#endif
+                        }
+                    }
                 }
+            } else {
+#ifndef NDEBUG
+                // Already dirty - that's OK, just means we were already scheduled for persistence
+                trace() << "[markDirty] Bucket NodeID=" << _bucket_node_id.raw()
+                          << " already dirty, skipping re-pin" << std::endl;
+#endif
             }
         }
         
@@ -2043,6 +2228,21 @@ namespace xtree {
             return _enlisted.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
         }
         
+        // Ensure a dirty bucket is pinned after it's been added to cache.
+        // This is called after cache insertion for buckets that were marked dirty
+        // before being added to cache (markDirty() couldn't pin them at that time).
+        void ensureDirtyPinned(CacheNode* cn) {
+            if (_dirty && !_dirty_pinned && cn && _bucket_node_id.valid()) {
+                uint64_t key = _bucket_node_id.raw();
+                _idx->getCache().pin(cn, key);
+                _dirty_pinned = true;
+#ifndef NDEBUG
+                trace() << "[ensureDirtyPinned] Pinned bucket NodeID=" << _bucket_node_id.raw()
+                          << " after cache insertion" << std::endl;
+#endif
+            }
+        }
+
         // Clear the enlisted flag after publishing
         void clearEnlistedFlag() noexcept {
             _enlisted.store(false, std::memory_order_release);
@@ -2215,7 +2415,10 @@ namespace xtree {
                 }
 
                 // Update parent's cached key for this child
-                cur->_parent->setKey(cur->_key);
+                // CRITICAL: Use setKeyOwned to maintain MBR ownership for bucket children.
+                // Using setKey() would alias the child's _key and set _owns_key=false,
+                // causing use-after-free when the child bucket is evicted.
+                cur->_parent->setKeyOwned(new KeyMBR(*cur->_key));
 
                 // If nothing changed here, no need to climb further
                 if (!curChanged) {
@@ -2398,6 +2601,10 @@ namespace xtree {
         // pointer to _parent
         _MBRKeyNode* _parent;               // 8 bytes
 
+        // NodeID of parent bucket - used to reload parent when it's been evicted from cache.
+        // This allows cascading updates to work even when parent is not in memory.
+        persist::NodeID _parent_node_id;    // 8 bytes
+
         // pointer to "next child". Defined as the next sibling, or
         // the "first" node on the next level. Used for BFS
         XTreeBucket<Record>* _nextChild;    // 8 bytes
@@ -2413,6 +2620,7 @@ namespace xtree {
         bool _ownsPreallocatedNodes;        // 1 byte
         // dirty flag for batch publishing
         bool _dirty;                        // 1 byte
+        bool _dirty_pinned = false;         // 1 byte - tracks if we pinned during markDirty()
         // enlisted flag for deduplication in dirty list
         std::atomic<bool> _enlisted;        // 1 byte
         // in memory child pointers
@@ -2511,6 +2719,24 @@ namespace xtree {
             else if(key1->getKey() == NULL) log() << "SortKeysByAreaEnlargement: KEY 1 KEY DATA IS NULL!!!!" << endl;
             if(key2 == NULL) log()  << "SortKeysByAreaEnlargement: KEY 2 IS NULL!!!" << endl;
             else if(key2->getKey() == NULL) log() << "SortKeysByAreaEnlargement: KEY 2 KEY DATA IS NULL!!!" << endl;
+#endif
+            // CRITICAL DEBUG: Check that bucket children have owned MBRs
+            // If _owns_key is false for a bucket child, eviction will cause use-after-free
+#ifndef NDEBUG
+            auto checkOwnership = [](const typename XTreeBucket<Record>::_MBRKeyNode* kn, const char* name) {
+                if (!kn || !kn->getKey()) return;
+                // Bucket children (non-data) MUST own their MBRs to survive eviction
+                if (!kn->isDataRecord() && !kn->ownsKey()) {
+                    log() << "EVICTION BUG DETECTED: " << name << " is bucket child but _owns_key=false! "
+                          << "NodeID=" << (kn->hasNodeID() ? std::to_string(kn->getNodeID().raw()) : "none")
+                          << " _recordKey=" << (void*)kn->getKey()
+                          << " _kn_addr=" << (void*)kn
+                          << std::endl;
+                    assert(false && "Bucket child must own its MBR to survive eviction");
+                }
+            };
+            checkOwnership(key1, "key1");
+            checkOwnership(key2, "key2");
 #endif
             double key1AE = key1->getKey()->areaEnlargement(*_key);
             double key2AE = key2->getKey()->areaEnlargement(*_key);

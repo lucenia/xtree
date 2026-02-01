@@ -3,6 +3,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "../src/xtree.h"  // Full XTreeBucket definition needed for IndexDetails
 #include "../src/indexdetails.hpp"
 #include "../src/persistence/memory_store.h"
 #include "../src/persistence/durable_runtime.h"
@@ -123,9 +124,9 @@ TEST_F(StoreIntegrationTest, DurableStoreCreation) {
 TEST_F(StoreIntegrationTest, IndexDetailsInMemoryMode) {
     // Create IndexDetails with IN_MEMORY mode
     std::vector<const char*> dims = {"x", "y", "z"};
-    IndexDetails<IRecord> index(3, 2, &dims, nullptr, nullptr,
+    IndexDetails<DataRecord> index(3, 2, &dims, nullptr, nullptr,
                                 "memory_test_field",  // field name
-                                IndexDetails<IRecord>::PersistenceMode::IN_MEMORY);
+                                IndexDetails<DataRecord>::PersistenceMode::IN_MEMORY);
     
     // Verify we have a store
     auto* store = index.getStore();
@@ -149,9 +150,9 @@ TEST_F(StoreIntegrationTest, IndexDetailsInMemoryMode) {
 TEST_F(StoreIntegrationTest, IndexDetailsDurableMode) {
     // Create IndexDetails with DURABLE mode
     std::vector<const char*> dims = {"x", "y", "z"};
-    IndexDetails<IRecord> index(3, 2, &dims, nullptr, nullptr,
+    IndexDetails<DataRecord> index(3, 2, &dims, nullptr, nullptr,
                                 "durable_test_field",  // field name
-                                IndexDetails<IRecord>::PersistenceMode::DURABLE,
+                                IndexDetails<DataRecord>::PersistenceMode::DURABLE,
                                 test_dir_);
     
     // Verify we have a durable store

@@ -10,6 +10,7 @@
 #include "./util/logmanager.h"
 #include "./util/log_control.h"
 #include "indexdetails.hpp"
+#include "cache_policy.hpp"
 #include "persistence/durable_store.h"
 #include "xtree.h"
 #include "xtree.hpp"
@@ -229,6 +230,9 @@ protected:
     }
     
     void TearDown() override {
+        // Reset to unlimited cache policy
+        IndexDetails<DataRecord>::applyCachePolicy("unlimited");
+
         // Clean up any test directories
         for (const auto& dir : test_dirs_) {
             std::filesystem::remove_all(dir);
@@ -494,14 +498,11 @@ TEST_F(XTreeDurabilityStressTest, HeavyLoadDurableMode) {
         const int NUM_RECORDS = 10000000;  // 10M records - stress test
         const int COMMIT_INTERVAL = 100000; // Commit every 100K records
 
-        // NOTE: Memory budgeting is currently disabled because:
-        // 1. The cache uses LRUDeleteNone, so evicted objects aren't freed
-        // 2. Evicting during traversal causes use-after-free on parent nodes
-        // 3. Proper implementation requires reload-from-mmap on cache miss
-        // TODO: Implement proper memory budgeting with lazy reload from mmap
-        // const size_t CACHE_MEMORY_BUDGET = 512 * 1024 * 1024;  // 512 MB
-        // IndexDetails<DataRecord>::setCacheMaxMemory(CACHE_MEMORY_BUDGET);
-        std::cout << "Cache memory budget: unlimited (budgeting disabled for now)\n";
+        // Apply 500MB cache memory budget using the policy system
+        const size_t CACHE_MEMORY_BUDGET = 500 * 1024 * 1024;  // 500 MB target
+        IndexDetails<DataRecord>::applyCachePolicy(
+            std::make_shared<FixedMemoryCachePolicy>(CACHE_MEMORY_BUDGET));
+        std::cout << "Cache memory budget: " << (CACHE_MEMORY_BUDGET / (1024.0 * 1024)) << " MB\n";
 
         std::cout << "Inserting " << NUM_RECORDS << " clustered points...\n" << std::flush;
         std::cout << "Query range: [" << QUERY_MIN_X << "," << QUERY_MIN_Y
@@ -566,14 +567,18 @@ TEST_F(XTreeDurabilityStressTest, HeavyLoadDurableMode) {
                 // Flush dirty buckets before commit
                 index.flush_dirty_buckets();
                 store->commit((i + 1) / COMMIT_INTERVAL);
-//                if ((i + 1) % 10000 == 0) {
-//                    auto elapsed = std::chrono::high_resolution_clock::now() - t0;
-//                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
-//                    double rate = (i + 1) * 1000.0 / std::max<int64_t>(1, ms);
-//                    std::cout << "  Progress: " << (i + 1) << " records"
-//                              << " (" << std::fixed << std::setprecision(1) 
-//                              << rate << " rec/s)\n";
-//                }
+
+                // Evict cache to stay under memory budget
+                size_t evicted = IndexDetails<DataRecord>::evictCacheToMemoryBudget();
+
+                auto elapsed = std::chrono::high_resolution_clock::now() - t0;
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+                double rate = (i + 1) * 1000.0 / std::max<int64_t>(1, ms);
+                size_t currentMem = IndexDetails<DataRecord>::getCacheCurrentMemory();
+                std::cout << "  Progress: " << (i + 1) << " records"
+                          << " (" << std::fixed << std::setprecision(0) << rate << " rec/s)"
+                          << " cache=" << StorageMetrics::formatBytes(currentMem)
+                          << " evicted=" << evicted << "\n";
             }
         }
 
