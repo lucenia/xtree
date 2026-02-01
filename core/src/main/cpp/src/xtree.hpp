@@ -68,20 +68,14 @@ namespace xtree {
             // CRITICAL FIX: Update currentCacheNode to track the cache node for subTree
             // subTree->_parent is the _MBRKeyNode in the parent bucket that references subTree.
             // Its getCacheRecord() returns the cache node for subTree (set by setCacheAlias during load).
-            if (subTree->_parent) {
-                CacheNode* childCN = subTree->_parent->getCacheRecord();
-                if (childCN && childCN->object == reinterpret_cast<IRecord*>(subTree)) {
-                    currentCacheNode = childCN;
-                } else {
-                    // Fallback: look up the cache entry by NodeID
-                    if (subTree->hasNodeID()) {
-                        using Alloc = XAlloc<RecordType>;
-                        uint64_t key = Alloc::cache_key_for(subTree->getNodeID(), subTree);
-                        auto* cn = this->_idx->getCache().find(key);
-                        if (cn && cn->object == reinterpret_cast<IRecord*>(subTree)) {
-                            currentCacheNode = cn;
-                        }
-                    }
+            // SAFETY: When eviction is possible, getCacheRecord() may return dangling pointer.
+            // Always use find() to get a validated cache node.
+            if (subTree->_parent && subTree->hasNodeID()) {
+                using Alloc = XAlloc<RecordType>;
+                uint64_t key = Alloc::cache_key_for(subTree->getNodeID(), subTree);
+                auto* cn = this->_idx->getCache().find(key);
+                if (cn && cn->object == reinterpret_cast<IRecord*>(subTree)) {
+                    currentCacheNode = cn;
                 }
             }
         }
@@ -329,7 +323,18 @@ namespace xtree {
         }
 
         // Validate the existing alias (if any). Only clear if truly invalid.
-        if (auto* cached_cn = kn->getCacheRecord()) {
+        // SAFETY: When eviction is possible, getCacheRecord() may return a dangling pointer.
+        // Use find() instead to validate the cache state.
+        const bool may_evict = idx->getCache().getMaxMemory() > 0;
+        decltype(cn) cached_cn = nullptr;
+        if (may_evict && pid.valid()) {
+            // Safe path: validate via cache lookup
+            cached_cn = idx->getCache().find(pid.raw());
+        } else {
+            // Fast path: trust the stored pointer
+            cached_cn = kn->getCacheRecord();
+        }
+        if (cached_cn) {
             auto* aliased = reinterpret_cast<XTreeBucket<RecordType>*>(cached_cn->object);
             const bool alias_valid =
                 aliased && aliased->hasNodeID() && (aliased->getNodeID() == pid);
@@ -377,15 +382,22 @@ namespace xtree {
 
 #ifndef NDEBUG
         // Clear any self-referencing aliases that could cause cache_or_load() to return the parent
+        // SAFETY: When eviction is possible, getCacheRecord() may return a dangling pointer.
+        // Use find() instead to validate.
+        const bool eviction_enabled = _idx->getCache().getMaxMemory() > 0;
         for (unsigned i = 0; i < this->_n; ++i) {
             _MBRKeyNode* kn = this->_kn(i);
             if (!kn) continue;
-            if (auto* cn = kn->getCacheRecord()) {
-                if (cn->object == reinterpret_cast<IRecord*>(this)) {
-                    trace() << "[DESCENT_SANITIZE] Clearing self-referencing alias on parent nid="
-                              << this->getNodeID().raw() << " at idx=" << i << "\n";
-                    kn->setCacheAlias(nullptr);
-                }
+
+            // Use auto to avoid CacheNode type issues
+            auto* cn_check = eviction_enabled && kn->hasNodeID()
+                ? _idx->getCache().find(kn->getNodeID().raw())
+                : kn->getCacheRecord();
+
+            if (cn_check && cn_check->object == reinterpret_cast<IRecord*>(this)) {
+                trace() << "[DESCENT_SANITIZE] Clearing self-referencing alias on parent nid="
+                          << this->getNodeID().raw() << " at idx=" << i << "\n";
+                kn->setCacheAlias(nullptr);
             }
         }
 #endif
@@ -999,6 +1011,10 @@ namespace xtree {
         const uint64_t cacheKey = Alloc::cache_key_for(rightRef.id, rightBucket);
         CacheNode* cachedSplitNode = this->_idx->getCache().add(cacheKey, reinterpret_cast<IRecord*>(rightBucket));
 
+        // CRITICAL: Pin the bucket now that it's in cache.
+        // markDirty() was called before cache insertion, so it couldn't pin.
+        rightBucket->ensureDirtyPinned(cachedSplitNode);
+
         // Step 4: Mutate LEFT: erase moved tail, fix _n, recompute MBR
         if (moved > 0) {
             this->_children.erase(this->_children.begin() + split_index + 1,
@@ -1354,12 +1370,26 @@ namespace xtree {
 #endif
 
         // Step 1: Wire sibling links (no parent pointer set yet on splitBucket)
-        auto* next = this->_nextChild;        // Remember original next
-        splitBucket->setNextChild(next);      // Right sibling -> next
-        splitBucket->_prevChild = this;       // Right sibling <- this
-        this->setNextChild(splitBucket);      // This -> right sibling
-        if (next && next->_prevChild != splitBucket) {
-            next->_prevChild = splitBucket;   // ensure back-link consistency
+        // NOTE: Sibling links are optimizations for traversal, not critical for correctness.
+        // With cache eviction enabled, _nextChild can become a dangling pointer to freed memory.
+        // Rather than risk use-after-free, we skip sibling link maintenance in DURABLE mode with eviction.
+        // The parent's _children vector maintains proper ordering.
+        const bool eviction_enabled = this->_idx && this->_idx->hasDurableStore() &&
+                                      this->_idx->getCache().getMaxMemory() > 0;
+        if (!eviction_enabled) {
+            // IN_MEMORY or no eviction: safe to use raw sibling pointers
+            auto* next = this->_nextChild;
+            splitBucket->setNextChild(next);      // Right sibling -> next
+            splitBucket->_prevChild = this;       // Right sibling <- this
+            this->setNextChild(splitBucket);      // This -> right sibling
+            if (next && next->_prevChild != splitBucket) {
+                next->_prevChild = splitBucket;   // ensure back-link consistency
+            }
+        } else {
+            // DURABLE with eviction: skip sibling chain (may have dangling pointers)
+            splitBucket->_prevChild = this;       // Right sibling <- this (safe, splitBucket is fresh)
+            this->setNextChild(splitBucket);      // This -> right sibling
+            splitBucket->setNextChild(nullptr);   // Clear outgoing link
         }
 
         // Step 2: Mark mutated children dirty for batch publishing

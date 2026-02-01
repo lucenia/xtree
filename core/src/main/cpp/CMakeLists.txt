@@ -606,6 +606,8 @@ set(GTEST_SOURCES
     test/test_lru_unit.cpp  # LRU cache unit tests
     test/test_lru_sharded.cpp  # Sharded LRU cache tests
     test/test_lru_sharded_stress.cpp  # Sharded LRU cache stress tests
+    test/test_cache_policy.cpp  # Cache memory policy tests
+    test/test_cache_policy_stress.cpp  # Cache policy stress tests
     # Concurrent tests saved for adaptation to new persistence layer
     # test/test_xtree_concurrent_search.cpp
     # test/test_xtree_simple_concurrent.cpp
