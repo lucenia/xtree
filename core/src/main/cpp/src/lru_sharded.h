@@ -131,9 +131,18 @@ public:
     // (e.g., after batch insert or commit) because evicting during tree traversal can cause
     // use-after-free when parent nodes are temporarily unpinned.
     Node* add(const Id& id, T* object) {
+        // Default: cache owns the object and will delete it on eviction/clear
+        return add(id, object, true);
+    }
+
+    // O(1) add with explicit ownership control
+    // owns_object=true: cache owns object, will delete on eviction/clear (heap-allocated)
+    // owns_object=false: cache does NOT own object, won't delete (mmap'd memory)
+    // NOTE: Does NOT automatically evict - see add() comment for rationale
+    Node* add(const Id& id, T* object, bool owns_object) {
         size_t shardIdx = getShardIndex(id);
         auto& shard = *_shards[shardIdx];
-        Node* node = shard.add(id, object);
+        Node* node = shard.add(id, object, owns_object);
 
         if (node) {
             // Track memory usage (only if budget is enabled)
@@ -463,13 +472,19 @@ public:
     // Ensures coherence between CacheNode->object and the current record.
     // Note: add() handles memory tracking internally
     Node* lookup_or_attach(const Id& key, T* record) {
+        return lookup_or_attach(key, record, true);  // Default: owns object
+    }
+
+    // Lookup or add with explicit ownership control
+    // owns_object=false for DURABLE mode (mmap'd memory, don't delete)
+    Node* lookup_or_attach(const Id& key, T* record, bool owns_object) {
         Node* cn = find_node(key);
         if (cn) {
             if (cn->object != record)
                 cn->object = record;
             return cn;
         }
-        return this->add(key, record);  // add() tracks memory
+        return this->add(key, record, owns_object);  // add() tracks memory
     }
 
     // Lookup cache node only (no insert).

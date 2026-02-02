@@ -85,6 +85,10 @@ namespace xtree {
               next(n), prev(nullptr),
               evictNext(nullptr), evictPrev(nullptr) {}
 
+        // Constructor with ownership flag (ignored for LRUDeleteNone - objects are never deleted)
+        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n, bool /*owns*/)
+            : LRUCacheNode(i, o, n) {}
+
         LRUCacheNode(const LRUCacheNode&) = delete;
         LRUCacheNode& operator=(const LRUCacheNode&) = delete;
 
@@ -111,16 +115,23 @@ namespace xtree {
     };
 
     // DeleteObject specialization
+    // Supports runtime ownership tracking for mixed heap/mmap objects
     template<typename CachedObjectType, typename IdType>
     struct LRUCacheNode<CachedObjectType, IdType, LRUDeleteObject> {
         using _SelfType = LRUCacheNode<CachedObjectType, IdType, LRUDeleteObject>;
 
-        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n)
-            : id(i), object(o), pin_count(0),
+        // Constructor with ownership flag (default: owns object, will delete)
+        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n, bool owns = true)
+            : id(i), object(o), pin_count(0), owns_object(owns),
               next(n), prev(nullptr),
               evictNext(nullptr), evictPrev(nullptr) {}
 
-        ~LRUCacheNode() { if (object) delete object; }
+        // Only delete if we own the object (heap-allocated, not mmap'd)
+        ~LRUCacheNode() {
+            if (object && owns_object) {
+                delete object;
+            }
+        }
 
         LRUCacheNode(const LRUCacheNode&) = delete;
         LRUCacheNode& operator=(const LRUCacheNode&) = delete;
@@ -134,9 +145,13 @@ namespace xtree {
         static inline bool isPinned(const _SelfType* n) noexcept { return n && n->pin_count.load(std::memory_order_relaxed) > 0; }
         inline uint32_t getPinCount() const noexcept { return pin_count.load(std::memory_order_relaxed); }
 
+        // Check if this node owns its object (for debugging/diagnostics)
+        inline bool ownsObject() const noexcept { return owns_object; }
+
         IdType id;
         CachedObjectType* object;
         std::atomic<uint32_t> pin_count;
+        bool owns_object;  // true = heap-allocated (delete on destroy), false = mmap'd (don't delete)
 
         _SelfType* next;
         _SelfType* prev;
@@ -153,6 +168,10 @@ namespace xtree {
             : id(i), object(o), pin_count(0),
               next(n), prev(nullptr),
               evictNext(nullptr), evictPrev(nullptr) {}
+
+        // Constructor with ownership flag (ignored for LRUDeleteArray - always uses delete[])
+        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n, bool /*owns*/)
+            : LRUCacheNode(i, o, n) {}
 
         ~LRUCacheNode() { if (object) delete[] object; }
 
@@ -187,6 +206,10 @@ namespace xtree {
             : id(i), object(o), pin_count(0),
               next(n), prev(nullptr),
               evictNext(nullptr), evictPrev(nullptr) {}
+
+        // Constructor with ownership flag (ignored for LRUFreeMalloc - always uses free())
+        explicit LRUCacheNode(const IdType& i, CachedObjectType* o, _SelfType* n, bool /*owns*/)
+            : LRUCacheNode(i, o, n) {}
 
         ~LRUCacheNode() { if (object) free(object); }
 
@@ -236,6 +259,11 @@ namespace xtree {
 
         // O(1) add
         Node* add(const IdType& id, CachedObjectType* object);
+
+        // Add with explicit ownership control (for DURABLE mode mmap'd objects)
+        // owns_object=true: cache will delete object on eviction/clear (heap-allocated)
+        // owns_object=false: cache will NOT delete object (mmap'd, managed externally)
+        Node* add(const IdType& id, CachedObjectType* object, bool owns_object);
 
         // O(1) atomic get-or-create, returns node already pinned
         // Thread-safe: If id exists, pins and returns existing node

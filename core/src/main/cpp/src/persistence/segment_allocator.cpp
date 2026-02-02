@@ -133,12 +133,18 @@ namespace xtree {
             if (!config_.validate()) {
                 throw std::invalid_argument("Invalid storage configuration");
             }
-            
+
             // Ensure data directory exists
             FSResult dir_result = PlatformFS::ensure_directory(data_dir);
             if (!dir_result.ok) {
                 // Log error but continue
             }
+        }
+
+        SegmentAllocator::~SegmentAllocator() {
+            // Ensure all pins are released before member destruction
+            // This prevents accessing MappingManager during static destructor phase
+            close_all();
         }
 
         SegmentAllocator::Allocation SegmentAllocator::allocate(size_t size, NodeKind kind) {
@@ -391,16 +397,23 @@ namespace xtree {
         void SegmentAllocator::close_all() {
             for (auto& ca : allocators_) {
                 std::lock_guard<std::mutex> g(ca.create_mu);
-                
+
                 // Unpublish the O(1) table first so concurrent readers fail fast
                 ca.seg_table_size.store(0, std::memory_order_release);
                 auto* table = ca.seg_table_root.exchange(nullptr, std::memory_order_release);
-                
-                // Close all segments
+
+                // Close all segments - IMPORTANT: release pins first to avoid
+                // accessing MappingManager during static destructor phase
                 for (auto& sp : ca.segments) {
                     if (sp) {
                         auto* s = sp.get();
-                        // REMOVED: Unmapping - now handled by MappingManager
+                        // Explicitly release the pin BEFORE segment destruction
+                        // This ensures MappingManager is accessed in controlled manner
+                        {
+                            std::lock_guard<std::mutex> seg_lock(s->remap_mutex);
+                            s->pin.reset();  // Release pin - calls MappingManager::unpin
+                            s->base_vaddr = nullptr;
+                        }
                         // Clear the segment metadata
                         s->used = 0;
                         s->capacity = 0;
@@ -410,7 +423,7 @@ namespace xtree {
                 ca.segments.clear();
                 ca.free_list.clear();
                 ca.active_segment = nullptr;
-                
+
                 // Delete the segment table
                 if (table) {
                     delete[] table;
@@ -469,7 +482,8 @@ namespace xtree {
             
             seg->file_id = file_id;
             seg->segment_id = class_segment_id;  // Dense 0..N-1 within class
-            
+            seg->writable = !read_only_;  // For lazy remapping
+
             // Align base_offset to stripe boundary for better I/O
             if (segment::kSegmentAlignment > 0 && allocator.bytes_in_current_file > 0) {
                 allocator.bytes_in_current_file = ((allocator.bytes_in_current_file + segment::kSegmentAlignment - 1) 
@@ -831,6 +845,7 @@ namespace xtree {
                 seg->class_id = class_id;
                 seg->base_offset = base_offset;
                 seg->capacity = capacity;
+                seg->writable = !read_only_;  // For lazy remapping
                 seg->base_vaddr = pin.get();  // Store stable virtual address
                 seg->pin = std::move(pin);      // Keep pin alive (by value)
                 seg->used = 0; // Will be updated as we replay allocations
@@ -925,6 +940,110 @@ namespace xtree {
             }
             
             return oss.str();
+        }
+
+        // ============================================================================
+        // Lazy Remapping Support
+        // ============================================================================
+
+        void SegmentAllocator::ensure_segment_mapped(Segment* seg) {
+            // Thread-safe remapping using segment's mutex
+            std::lock_guard<std::mutex> lock(seg->remap_mutex);
+
+            // Double-check after acquiring lock (another thread may have remapped)
+            if (seg->pin) {
+                return;  // Already mapped
+            }
+
+            // Compute file path from file_id
+            std::string file_path = get_data_file_path(seg->file_id);
+
+            // Remap the segment using MappingManager
+            seg->pin = mapping_manager_->pin(file_path,
+                                             static_cast<size_t>(seg->base_offset),
+                                             static_cast<size_t>(seg->capacity),
+                                             seg->writable);
+
+            if (seg->pin) {
+                seg->base_vaddr = seg->pin.get();
+                trace() << "[LAZY_REMAP] Remapped segment class=" << int(seg->class_id)
+                        << " file=" << seg->file_id
+                        << " seg=" << seg->segment_id
+                        << " offset=" << seg->base_offset
+                        << std::endl;
+            } else {
+                seg->base_vaddr = nullptr;
+                trace() << "[LAZY_REMAP] FAILED to remap segment class=" << int(seg->class_id)
+                        << " file=" << seg->file_id
+                        << std::endl;
+            }
+        }
+
+        size_t SegmentAllocator::release_cold_pins(uint64_t threshold_ns) {
+            using namespace std::chrono;
+            const uint64_t now_ns = duration_cast<nanoseconds>(
+                high_resolution_clock::now().time_since_epoch()).count();
+
+            size_t released = 0;
+
+            for (auto& allocator : allocators_) {
+                // Take the class allocator lock to iterate segments safely
+                std::lock_guard<std::mutex> ca_lock(allocator.mu);
+
+                for (auto& seg_ptr : allocator.segments) {
+                    Segment* seg = seg_ptr.get();
+                    if (!seg || !seg->pin) continue;  // Already released or invalid
+
+                    // Check if segment hasn't been accessed recently
+                    uint64_t last_access = seg->last_access_ns.load(std::memory_order_relaxed);
+                    if (last_access == 0) {
+                        // Never accessed via get_ptr - initialize to now and skip
+                        seg->last_access_ns.store(now_ns, std::memory_order_relaxed);
+                        continue;
+                    }
+
+                    if (now_ns - last_access > threshold_ns) {
+                        // Segment is cold - release its pin
+                        std::lock_guard<std::mutex> seg_lock(seg->remap_mutex);
+
+                        // Double-check pin is still valid after lock
+                        if (seg->pin) {
+                            seg->pin.reset();
+                            seg->base_vaddr = nullptr;
+                            released++;
+
+                            trace() << "[LAZY_REMAP] Released cold pin class=" << int(seg->class_id)
+                                    << " file=" << seg->file_id
+                                    << " seg=" << seg->segment_id
+                                    << " age_ms=" << ((now_ns - last_access) / 1000000)
+                                    << std::endl;
+                        }
+                    }
+                }
+            }
+
+            if (released > 0) {
+                trace() << "[LAZY_REMAP] Released " << released << " cold segment pins"
+                        << std::endl;
+            }
+
+            return released;
+        }
+
+        size_t SegmentAllocator::get_pinned_segment_count() const {
+            size_t count = 0;
+
+            for (const auto& allocator : allocators_) {
+                std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(allocator.mu));
+
+                for (const auto& seg_ptr : allocator.segments) {
+                    if (seg_ptr && seg_ptr->pin) {
+                        count++;
+                    }
+                }
+            }
+
+            return count;
         }
 
     } // namespace persist
