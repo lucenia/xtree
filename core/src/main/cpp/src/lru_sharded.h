@@ -422,6 +422,42 @@ public:
         return stats;
     }
 
+    // Detailed stats showing type breakdown and pin counts
+    struct DetailedStats {
+        size_t dataRecords = 0;
+        size_t dataRecordsPinned = 0;
+        size_t buckets = 0;
+        size_t bucketsPinned = 0;
+        size_t totalPinCount = 0;  // Sum of all pin counts
+        size_t maxPinCount = 0;    // Highest pin count seen
+    };
+
+    // Analyze cache contents by type (requires IRecord interface)
+    template<typename Analyzer>
+    DetailedStats getDetailedStats(Analyzer isDataRecord) const {
+        DetailedStats stats;
+        for (const auto& shard : _shards) {
+            shard->forEachNode([&](const Node* node) {
+                if (!node || !node->object) return;
+
+                bool isData = isDataRecord(node->object);
+                uint32_t pinCount = node->getPinCount();
+
+                if (isData) {
+                    stats.dataRecords++;
+                    if (pinCount > 0) stats.dataRecordsPinned++;
+                } else {
+                    stats.buckets++;
+                    if (pinCount > 0) stats.bucketsPinned++;
+                }
+
+                stats.totalPinCount += pinCount;
+                if (pinCount > stats.maxPinCount) stats.maxPinCount = pinCount;
+            });
+        }
+        return stats;
+    }
+
     // Semantic cache coherence helpers for XTree durability layer
     // Lookup or add a cache entry for a given key and record pointer.
     // Ensures coherence between CacheNode->object and the current record.

@@ -21,6 +21,16 @@
 namespace xtree {
 namespace persist {
 
+FileHandleRegistry& FileHandleRegistry::global() {
+    // Meyers' singleton - thread-safe lazy initialization (C++11)
+    static FileHandleRegistry* instance = []() {
+        // Default to 512 open files for the global registry
+        auto* fhr = new FileHandleRegistry(512);
+        return fhr;
+    }();
+    return *instance;
+}
+
 void FileHandle::close() {
     if (fd >= 0) {
         ::close(fd);

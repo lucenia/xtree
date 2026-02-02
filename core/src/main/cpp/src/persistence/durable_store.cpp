@@ -750,6 +750,11 @@ namespace xtree {
         }
 
         void DurableStore::commit(uint64_t hint_epoch) {
+            // Guard: block commits in read-only mode
+            if (ctx_.runtime.is_read_only()) {
+                throw std::logic_error("Cannot commit in read-only mode (serverless reader)");
+            }
+
             // Fast path: nothing to commit
             if (tl_batch_.writes.empty() && tl_batch_.retirements.empty()) {
                 return;

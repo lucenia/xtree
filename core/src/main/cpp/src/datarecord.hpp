@@ -273,9 +273,12 @@ public:
     IDataRecord* asDataRecord() noexcept override { return this; }
     const IDataRecord* asDataRecord() const noexcept override { return this; }
     
-    long memoryUsage() const override { 
-        // View itself is small, actual data is mmap'd
-        return sizeof(*this) + (_key ? sizeof(KeyMBR) : 0);
+    long memoryUsage() const override {
+        // CRITICAL: Include the mmap'd data size for accurate memory budgeting.
+        // Without this, the cache thinks DataRecordViews are tiny (~74 bytes)
+        // when they actually hold references to mmap'd data (typically 100+ bytes each).
+        // This ensures the cache eviction actually respects the memory budget.
+        return sizeof(*this) + (_key ? sizeof(KeyMBR) : 0) + size_;
     }
 
     // IDataRecord interface

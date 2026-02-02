@@ -113,6 +113,10 @@ namespace xtree {
             Allocation allocate(size_t size, NodeKind kind = NodeKind::Internal);
             void       free(Allocation& a);  // Non-const now (moves the pin)
             void       close_all();  // Close all segments and mappings for clean shutdown
+
+            // Read-only mode for serverless readers
+            void set_read_only(bool read_only) { read_only_ = read_only; }
+            bool is_read_only() const { return read_only_; }
             
             // PERFORMANCE: O(1) lookup using segment table
             FORCE_INLINE void* get_ptr(const Allocation& a) noexcept;
@@ -324,7 +328,10 @@ namespace xtree {
             // NEW: Registry pointers for windowed mmap
             FileHandleRegistry* file_registry_ = nullptr;
             MappingManager* mapping_manager_ = nullptr;
-            
+
+            // Read-only mode flag for serverless readers
+            bool read_only_ = false;
+
             // Internal registries (owned) for legacy constructor
             std::unique_ptr<FileHandleRegistry> owned_file_registry_;
             std::unique_ptr<MappingManager> owned_mapping_manager_;

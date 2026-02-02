@@ -46,10 +46,18 @@ namespace xtree {
 
         class DurableRuntime {
         public:
-            static std::unique_ptr<DurableRuntime> open(const Paths& paths, const CheckpointPolicy& policy, 
-                                                        bool use_payload_recovery = false);
+            // Open a durable runtime
+            // read_only: If true, skip WAL replay and open in checkpoint-only mode
+            //            for fast serverless startup. Writes are blocked.
+            static std::unique_ptr<DurableRuntime> open(const Paths& paths,
+                                                        const CheckpointPolicy& policy,
+                                                        bool use_payload_recovery = false,
+                                                        bool read_only = false);
 
             ~DurableRuntime(); // stops coordinator
+
+            // Check if this runtime is in read-only mode
+            bool is_read_only() const { return read_only_; }
 
             // Accessors used by DurableStore
             inline MVCCContext&          mvcc()         { return *mvcc_; }
@@ -68,13 +76,14 @@ namespace xtree {
             bool is_catalog_dirty() const { return catalog_dirty_.load(std::memory_order_acquire); }
 
         private:
-            DurableRuntime(Paths, CheckpointPolicy);
+            DurableRuntime(Paths, CheckpointPolicy, bool read_only = false);
             void start();
             void stop();
 
         private:
             Paths paths_;
             CheckpointPolicy policy_;
+            bool read_only_ = false;  // True = checkpoint-only mode, no WAL replay
 
             std::unique_ptr<Manifest>           manifest_;
             std::unique_ptr<MVCCContext>        mvcc_;

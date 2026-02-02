@@ -4,8 +4,14 @@
 
 #include "mapping_manager.h"
 #include "config.h"  // For sys_config::get_page_size()
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <unistd.h>
+#endif
+
 #include <errno.h>
 #include <stdexcept>
 #include <algorithm>
@@ -15,6 +21,51 @@
 
 namespace xtree {
 namespace persist {
+
+MappingManager& MappingManager::global() {
+    // Meyers' singleton - thread-safe lazy initialization (C++11)
+    static MappingManager* instance = []() {
+        // Default configuration for global manager:
+        // - 128MB window size (smaller for better granularity)
+        // - 4GB max memory budget (configurable via environment)
+        size_t window_size = 128ULL << 20;  // 128 MB
+        size_t max_memory = 4ULL << 30;     // 4 GB default budget
+        size_t max_extents = 8192;          // VMA limit fallback
+
+        // Check environment for overrides
+        if (const char* env = std::getenv("XTREE_MMAP_WINDOW_SIZE")) {
+            window_size = std::stoull(env);
+        }
+        if (const char* env = std::getenv("XTREE_MMAP_BUDGET")) {
+            // Parse memory size with suffixes (e.g., "2GB", "512MB")
+            std::string val(env);
+            size_t multiplier = 1;
+            if (val.size() > 2) {
+                std::string suffix = val.substr(val.size() - 2);
+                if (suffix == "GB" || suffix == "gb") {
+                    multiplier = 1ULL << 30;
+                    val = val.substr(0, val.size() - 2);
+                } else if (suffix == "MB" || suffix == "mb") {
+                    multiplier = 1ULL << 20;
+                    val = val.substr(0, val.size() - 2);
+                } else if (suffix == "KB" || suffix == "kb") {
+                    multiplier = 1ULL << 10;
+                    val = val.substr(0, val.size() - 2);
+                }
+            }
+            max_memory = std::stoull(val) * multiplier;
+        }
+
+        auto* mm = new MappingManager(
+            FileHandleRegistry::global(),
+            window_size,
+            max_extents
+        );
+        mm->set_memory_budget(max_memory);
+        return mm;
+    }();
+    return *instance;
+}
 
 void MappingExtent::unmap() {
     if (base != nullptr) {
@@ -51,6 +102,26 @@ void FileMapping::insert_extent(std::unique_ptr<MappingExtent> ext) {
 
 void MappingManager::Pin::release() {
     if (mgr_ && ext_ && ext_->pins > 0) {
+        // Advise OS that this memory region is no longer needed.
+        // This allows the OS to drop the pages from physical memory,
+        // reducing RSS without unmapping the entire extent.
+        // The data can be paged back in from disk if accessed again.
+        if (ptr_ && size_ > 0) {
+#if defined(_WIN32)
+            // Windows: VirtualUnlock allows pages to be swapped out
+            // DiscardVirtualMemory is stronger but requires Windows 8.1+
+            // For now, VirtualUnlock is the most portable option
+            VirtualUnlock(ptr_, size_);
+#elif defined(__APPLE__)
+            // macOS: MADV_FREE is more aggressive than MADV_DONTNEED
+            // It marks pages as "can be reused immediately" rather than just hinting
+            madvise(ptr_, size_, MADV_FREE);
+#else
+            // Linux: MADV_DONTNEED immediately drops pages from RSS
+            madvise(ptr_, size_, MADV_DONTNEED);
+#endif
+        }
+
         std::lock_guard<std::mutex> lock(mgr_->mu_);
         ext_->pins--;
         mgr_->total_pins_--;
@@ -141,8 +212,8 @@ MappingManager::Pin MappingManager::pin(const std::string& path,
     ext->pins++;
     ext->update_last_use();
     total_pins_++;
-    
-    return Pin(this, fmap, ext, ptr);
+
+    return Pin(this, fmap, ext, ptr, len);
 }
 
 void MappingManager::unpin(Pin&& p) {
@@ -188,21 +259,26 @@ size_t MappingManager::debug_total_extents() const {
 
 void MappingManager::debug_evict_all_unpinned() {
     std::lock_guard<std::mutex> lock(mu_);
-    
+
     for (auto& [path, fmap] : by_file_) {
         if (!fmap) continue;
-        
+
         FileMapping* fmap_ptr = fmap.get();  // Get raw pointer for lambda capture
         auto& extents = fmap_ptr->extents;
         extents.erase(
             std::remove_if(extents.begin(), extents.end(),
                 [this, fmap_ptr](std::unique_ptr<MappingExtent>& ext) {
                     if (ext && ext->pins == 0) {
+                        size_t evicted_bytes = ext->length;
                         ext->unmap();
-                        
+
+                        // Track memory reduction
+                        total_memory_mapped_ -= evicted_bytes;
+                        evictions_bytes_ += evicted_bytes;
+
                         // Unpin the file handle for this extent
                         fhr_.unpin(fmap_ptr->fh);
-                        
+
                         total_extents_--;
                         total_evictions_++;
                         return true;
@@ -211,16 +287,46 @@ void MappingManager::debug_evict_all_unpinned() {
                 }),
             extents.end()
         );
-        
+
         // If no more extents, release the file handle
         if (extents.empty() && fmap_ptr->fh) {
             fhr_.release(fmap_ptr->fh);
             fmap_ptr->fh.reset();
         }
     }
-    
+
     // NEW: tell FHR to drop any now-unpinned FDs immediately
     fhr_.debug_evict_all_unpinned();
+}
+
+void MappingManager::set_memory_budget(size_t max_bytes, float eviction_headroom) {
+    std::lock_guard<std::mutex> lock(mu_);
+    max_memory_budget_ = max_bytes;
+    // Clamp headroom to [0.0, 0.5]
+    if (eviction_headroom < 0.0f) eviction_headroom = 0.0f;
+    if (eviction_headroom > 0.5f) eviction_headroom = 0.5f;
+    eviction_headroom_ = eviction_headroom;
+}
+
+size_t MappingManager::get_total_memory_mapped() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    return total_memory_mapped_;
+}
+
+MappingManager::MappingStats MappingManager::getStats() const {
+    std::lock_guard<std::mutex> lock(mu_);
+    MappingStats stats;
+    stats.total_extents = total_extents_;
+    stats.total_memory_mapped = total_memory_mapped_;
+    stats.max_memory_budget = max_memory_budget_;
+    stats.total_pins_active = total_pins_;
+    stats.evictions_count = total_evictions_;
+    stats.evictions_bytes = evictions_bytes_;
+    if (max_memory_budget_ > 0) {
+        stats.memory_utilization =
+            static_cast<double>(total_memory_mapped_) / static_cast<double>(max_memory_budget_);
+    }
+    return stats;
 }
 
 MappingExtent* MappingManager::ensure_extent(FileMapping& fm, 
@@ -317,49 +423,106 @@ MappingExtent* MappingManager::ensure_extent(FileMapping& fm,
     // Pin the file handle for this mapped extent
     fhr_.pin(fm.fh);
     
-    // Insert into FileMapping
+    // Insert into FileMapping and track memory
+    size_t extent_size = result->length;
     fm.insert_extent(std::move(new_ext));
     total_extents_++;
-    
+    total_memory_mapped_ += extent_size;  // Track memory usage
+
     return result;
 }
 
 void MappingManager::evict_extents_if_needed() {
-    if (total_extents_ >= max_extents_global_) {
+    // Primary: Memory-based eviction (if budget is set)
+    if (max_memory_budget_ > 0 && total_memory_mapped_ > max_memory_budget_) {
+        // Evict to target with hysteresis to avoid thrashing
+        size_t target = static_cast<size_t>(
+            max_memory_budget_ * (1.0f - eviction_headroom_));
+        evict_to_memory_target(target);
+    }
+    // Secondary: Count-based eviction (VMA limit fallback)
+    else if (total_extents_ >= max_extents_global_) {
         size_t to_evict = (total_extents_ - max_extents_global_) + 1;
         auto candidates = find_eviction_candidates(to_evict);
-        
+
         for (const auto& [path, idx] : candidates) {
             auto it = by_file_.find(path);
             if (it != by_file_.end() && it->second) {
                 auto& fmap = it->second;
                 auto& extents = fmap->extents;
                 if (idx < extents.size() && extents[idx]) {
+                    size_t evicted_bytes = extents[idx]->length;
                     extents[idx]->unmap();
-                    
+
+                    // Track memory reduction
+                    total_memory_mapped_ -= evicted_bytes;
+                    evictions_bytes_ += evicted_bytes;
+
                     // Unpin the file handle for this extent
                     fhr_.unpin(fmap->fh);
-                    
+
                     extents.erase(extents.begin() + idx);
                     total_extents_--;
                     total_evictions_++;
-                    
+
                     // If no more extents, release the file handle
                     if (extents.empty() && fmap->fh) {
                         fhr_.release(fmap->fh);
                         fmap->fh.reset();
-                        // Optionally remove the FileMapping entry
-                        // by_file_.erase(path);
                     }
                 }
             }
         }
-        
+
         if (candidates.empty() && total_extents_ >= max_extents_global_) {
             trace() << "[MappingManager] Warning: Cannot evict - all extents are pinned. "
-                      << "Total: " << total_extents_ 
+                      << "Total: " << total_extents_
                       << ", Max: " << max_extents_global_ << std::endl;
         }
+    }
+}
+
+void MappingManager::evict_to_memory_target(size_t target_bytes) {
+    // Find candidates sorted by LRU (oldest first)
+    auto candidates = find_eviction_candidates(total_extents_);  // Get all candidates
+
+    for (const auto& [path, idx] : candidates) {
+        if (total_memory_mapped_ <= target_bytes) {
+            break;  // Reached target
+        }
+
+        auto it = by_file_.find(path);
+        if (it != by_file_.end() && it->second) {
+            auto& fmap = it->second;
+            auto& extents = fmap->extents;
+            if (idx < extents.size() && extents[idx] && extents[idx]->pins == 0) {
+                size_t evicted_bytes = extents[idx]->length;
+                extents[idx]->unmap();
+
+                // Track memory reduction
+                total_memory_mapped_ -= evicted_bytes;
+                evictions_bytes_ += evicted_bytes;
+
+                // Unpin the file handle for this extent
+                fhr_.unpin(fmap->fh);
+
+                extents.erase(extents.begin() + idx);
+                total_extents_--;
+                total_evictions_++;
+
+                // If no more extents, release the file handle
+                if (extents.empty() && fmap->fh) {
+                    fhr_.release(fmap->fh);
+                    fmap->fh.reset();
+                }
+            }
+        }
+    }
+
+    if (total_memory_mapped_ > target_bytes) {
+        trace() << "[MappingManager] Warning: Cannot reach memory target - extents pinned. "
+                  << "Current: " << total_memory_mapped_
+                  << ", Target: " << target_bytes << std::endl;
     }
 }
 

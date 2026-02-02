@@ -33,46 +33,81 @@ namespace persist {
 struct StorageConfig {
     // File organization
     size_t max_file_size       = files::kMaxFileSize;      // Default 1GB
-    size_t mmap_window_size    = files::kMMapWindowSize;   // Default 1GB
+    size_t mmap_window_size    = 128ULL << 20;             // Default 128MB (reduced for better granularity)
     size_t target_file_size    = files::kTargetFileSize;   // Default 256MB
-    
+
+    // Memory budget for mmap
+    size_t max_mmap_memory     = 4ULL << 30;               // Default 4GB (0 = unlimited)
+    float mmap_eviction_headroom = 0.1f;                   // 10% hysteresis
+
     // Checkpoint policy
     size_t checkpoint_keep_count = 2;                      // Keep N checkpoints (reduced for space)
-    
+
     // Segment allocation
     size_t segment_alignment   = segment::kSegmentAlignment; // Default 4KB
-    
+
     // File handle limits
     size_t max_open_files      = 256;                      // Max FDs to use
+
+    // Global registry usage
+    bool use_global_registries = true;                     // Use global MappingManager/FileHandleRegistry
     
     /**
      * Create config with defaults, optionally reading from environment
      */
     static StorageConfig defaults() {
         StorageConfig cfg;
-        
+
         // Check environment variables for overrides
         if (const char* env = std::getenv("XTREE_MAX_FILE_SIZE")) {
             cfg.max_file_size = std::stoull(env);
-            // Auto-adjust window size to match
-            if (cfg.max_file_size > cfg.mmap_window_size) {
-                cfg.mmap_window_size = cfg.max_file_size;
-            }
         }
-        
+
         if (const char* env = std::getenv("XTREE_MMAP_WINDOW_SIZE")) {
-            cfg.mmap_window_size = std::stoull(env);
+            cfg.mmap_window_size = parseMemorySize(env);
         }
-        
+
+        if (const char* env = std::getenv("XTREE_MMAP_BUDGET")) {
+            cfg.max_mmap_memory = parseMemorySize(env);
+        }
+
+        if (const char* env = std::getenv("XTREE_MMAP_HEADROOM")) {
+            cfg.mmap_eviction_headroom = std::stof(env);
+        }
+
         if (const char* env = std::getenv("XTREE_CHECKPOINT_KEEP_COUNT")) {
             cfg.checkpoint_keep_count = std::stoull(env);
         }
-        
+
         if (const char* env = std::getenv("XTREE_MAX_OPEN_FILES")) {
             cfg.max_open_files = std::stoull(env);
         }
-        
+
+        if (const char* env = std::getenv("XTREE_USE_GLOBAL_REGISTRIES")) {
+            cfg.use_global_registries = (std::string(env) != "0" && std::string(env) != "false");
+        }
+
         return cfg;
+    }
+
+    // Parse memory size with suffixes (e.g., "4GB", "512MB", "1024KB")
+    static size_t parseMemorySize(const char* str) {
+        std::string val(str);
+        size_t multiplier = 1;
+        if (val.size() > 2) {
+            std::string suffix = val.substr(val.size() - 2);
+            if (suffix == "GB" || suffix == "gb") {
+                multiplier = 1ULL << 30;
+                val = val.substr(0, val.size() - 2);
+            } else if (suffix == "MB" || suffix == "mb") {
+                multiplier = 1ULL << 20;
+                val = val.substr(0, val.size() - 2);
+            } else if (suffix == "KB" || suffix == "kb") {
+                multiplier = 1ULL << 10;
+                val = val.substr(0, val.size() - 2);
+            }
+        }
+        return std::stoull(val) * multiplier;
     }
     
     /**
@@ -114,16 +149,20 @@ struct StorageConfig {
      * Validate configuration
      */
     bool validate() const {
-        if (mmap_window_size < max_file_size) {
-            // Window must be at least as large as file size
-            return false;
-        }
         if (max_file_size < 1024 * 1024) {
             // Minimum 1MB file size
             return false;
         }
+        if (mmap_window_size < 1024 * 1024) {
+            // Minimum 1MB window size
+            return false;
+        }
         if (checkpoint_keep_count < 1) {
             // Must keep at least one checkpoint
+            return false;
+        }
+        if (mmap_eviction_headroom < 0.0f || mmap_eviction_headroom > 0.5f) {
+            // Headroom must be in [0%, 50%]
             return false;
         }
         return true;

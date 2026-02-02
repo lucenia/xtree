@@ -23,6 +23,7 @@
 #include "../util/log.h"
 #include <algorithm>
 #include <cstdio>
+#include <thread>
 #include <climits>
 #include <filesystem>
 #ifndef _WIN32
@@ -130,6 +131,19 @@ void CheckpointCoordinator::initialize_after_recovery(uint64_t recovered_epoch, 
 void CheckpointCoordinator::request_checkpoint() {
   checkpoint_requested_.store(true, std::memory_order_release);
   cv_.notify_all();
+}
+
+void CheckpointCoordinator::force_checkpoint() {
+  // Always do checkpoint synchronously for force_checkpoint
+  // This ensures checkpoint is complete before returning
+  const uint64_t epoch = mvcc_.get_global_epoch();
+
+  // Sync the active log first to ensure all deltas are durable
+  if (auto log = std::atomic_load(&active_log_)) {
+    log->sync();
+  }
+
+  do_checkpoint(epoch);
 }
 
 void CheckpointCoordinator::update_throughput(uint64_t records_inserted) {
@@ -399,13 +413,14 @@ void CheckpointCoordinator::do_checkpoint_impl(uint64_t epoch, int post_op_int) 
   }
   
   // OTCheckpoint creates: data_dir/ot_checkpoint_epoch-N.bin
-  std::ostringstream final_path_stream;
-  final_path_stream << manifest_.get_data_dir() << "/ot_checkpoint_epoch-" << epoch << ".bin";
-  std::string final_path = final_path_stream.str();
-  
+  // Store relative path in manifest (just filename, not full path)
+  std::ostringstream filename_stream;
+  filename_stream << "ot_checkpoint_epoch-" << epoch << ".bin";
+  std::string filename = filename_stream.str();
+
   // Atomically record checkpoint in manifest (fsync + dir fsync)
   Manifest::CheckpointInfo ckpt_info;
-  ckpt_info.path = final_path;
+  ckpt_info.path = filename;  // Store relative path only
   ckpt_info.epoch = epoch;
   ckpt_info.size = 0;  // Could get from file stat
   ckpt_info.entries = 0;  // Could track from OT
