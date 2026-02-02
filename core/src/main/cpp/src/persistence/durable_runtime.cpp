@@ -34,8 +34,9 @@ namespace xtree {
 
         std::unique_ptr<DurableRuntime>
         DurableRuntime::open(const Paths& paths, const CheckpointPolicy& policy,
-                             bool use_payload_recovery, bool read_only) {
-        auto rt = std::unique_ptr<DurableRuntime>(new DurableRuntime(paths, policy, read_only));
+                             bool use_payload_recovery, bool read_only,
+                             const std::string& field_name) {
+        auto rt = std::unique_ptr<DurableRuntime>(new DurableRuntime(paths, policy, read_only, field_name));
 
         // Recovery: build OT from latest checkpoint + optionally replay deltas
         // Create recovery helper
@@ -82,14 +83,15 @@ namespace xtree {
         return rt;
         }
 
-        DurableRuntime::DurableRuntime(Paths p, CheckpointPolicy pol, bool read_only)
-        : paths_(std::move(p)), policy_(pol), read_only_(read_only) {
+        DurableRuntime::DurableRuntime(Paths p, CheckpointPolicy pol, bool read_only,
+                                       const std::string& field_name)
+        : paths_(std::move(p)), policy_(pol), read_only_(read_only), field_name_(field_name) {
             manifest_   = std::make_unique<Manifest>(paths_.data_dir);
             mvcc_       = std::make_unique<MVCCContext>();
             // Use sharded ObjectTable for concurrent allocation
             // Starts with 1 active shard, grows as needed
             ot_sharded_ = std::make_unique<ObjectTableSharded>(100000, ObjectTableSharded::DEFAULT_NUM_SHARDS);
-            alloc_      = std::make_unique<SegmentAllocator>(paths_.data_dir);
+            alloc_      = std::make_unique<SegmentAllocator>(paths_.data_dir, field_name_);
 
             // Set read-only mode on allocator for serverless readers
             if (read_only_) {

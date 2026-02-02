@@ -48,8 +48,9 @@ namespace xtree {
         std::atomic<uint64_t> g_segment_lock_count{0};
         #endif
 
-        SegmentAllocator::SegmentAllocator(const std::string& data_dir)
-            : data_dir_(data_dir), config_(StorageConfig::defaults()) {
+        SegmentAllocator::SegmentAllocator(const std::string& data_dir,
+                                           const std::string& field_name)
+            : data_dir_(data_dir), field_name_(field_name), config_(StorageConfig::defaults()) {
             // Use global registries if configured (default), otherwise create owned ones
             if (config_.use_global_registries) {
                 file_registry_ = &FileHandleRegistry::global();
@@ -81,8 +82,9 @@ namespace xtree {
                       "Minimum size class must satisfy max alignment requirements");
         
         // New constructor with explicit configuration
-        SegmentAllocator::SegmentAllocator(const std::string& data_dir, const StorageConfig& config)
-            : data_dir_(data_dir), config_(config) {
+        SegmentAllocator::SegmentAllocator(const std::string& data_dir, const StorageConfig& config,
+                                           const std::string& field_name)
+            : data_dir_(data_dir), field_name_(field_name), config_(config) {
             if (!config_.validate()) {
                 throw std::invalid_argument("Invalid storage configuration");
             }
@@ -113,8 +115,9 @@ namespace xtree {
         // Constructor that takes registries (for DurableStore)
         SegmentAllocator::SegmentAllocator(const std::string& data_dir,
                                            FileHandleRegistry& fhr,
-                                           MappingManager& mm)
-            : data_dir_(data_dir), file_registry_(&fhr), mapping_manager_(&mm),
+                                           MappingManager& mm,
+                                           const std::string& field_name)
+            : data_dir_(data_dir), field_name_(field_name), file_registry_(&fhr), mapping_manager_(&mm),
               config_(StorageConfig::defaults()) {
             // Ensure data directory exists
             FSResult dir_result = PlatformFS::ensure_directory(data_dir);
@@ -127,8 +130,9 @@ namespace xtree {
         SegmentAllocator::SegmentAllocator(const std::string& data_dir,
                                            FileHandleRegistry& fhr,
                                            MappingManager& mm,
-                                           const StorageConfig& config)
-            : data_dir_(data_dir), file_registry_(&fhr), mapping_manager_(&mm),
+                                           const StorageConfig& config,
+                                           const std::string& field_name)
+            : data_dir_(data_dir), field_name_(field_name), file_registry_(&fhr), mapping_manager_(&mm),
               config_(config) {
             if (!config_.validate()) {
                 throw std::invalid_argument("Invalid storage configuration");
@@ -553,7 +557,12 @@ namespace xtree {
                 
                 // Store stable virtual address
                 seg->base_vaddr = seg->pin.get();
-                
+
+                // Register this file with the field for per-index memory tracking
+                if (!field_name_.empty()) {
+                    mapping_manager_->register_file_for_field(data_path, field_name_);
+                }
+
             } catch (const std::exception& e) {
                 // Failed to map segment - this is critical
                 allocator.bytes_in_current_file -= aligned_segment_size;
@@ -856,6 +865,11 @@ namespace xtree {
                 seg->bm.resize(bm_words, ~0ull); // All blocks initially free
                 seg->free_count = seg->blocks;
                 seg->max_allocated = 0;  // Will be updated during WAL replay
+
+                // Register this file with the field for per-index memory tracking
+                if (!field_name_.empty()) {
+                    mapping_manager_->register_file_for_field(file_path, field_name_);
+                }
             } catch (const std::exception& e) {
                 // Failed to map segment - file doesn't exist
                 return nullptr;

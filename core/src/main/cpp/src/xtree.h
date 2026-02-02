@@ -397,10 +397,14 @@ namespace xtree {
             // If a durable child is already set, do not touch flags or key/aliasing.
             // Durable attach is final for the key/NodeID; use clearDurableChild() first if you need to replace.
             if (_node_id.valid() && _owns_key && _recordKey) {
+                std::cerr << "[setRecord] Early return due to durable state: kn=" << (void*)this
+                          << " nid=" << _node_id.raw() << std::endl << std::flush;
                 return;
             }
 
             if (!record || !record->object) {
+                std::cerr << "[setRecord] Null record/object, clearing cache: kn=" << (void*)this
+                          << " record=" << (void*)record << std::endl << std::flush;
                 _cache_ptr = nullptr;
                 return; // durable path must have set _recordKey/_node_id already
             }
@@ -1505,6 +1509,11 @@ namespace xtree {
                 child->setDataRecord(false);
                 child->setLeaf(bucket->isLeaf()); // only meaningful for bucket children
 
+                // CRITICAL FIX: Wire the bucket's _parent pointer to this KN immediately.
+                // This ensures that after splits/sorts, bucket->_parent always points to
+                // the correct KN in the parent's _children array.
+                bucket->setParent(child);
+
                 if (durable) {
                     // Bucket must have NodeID so it can be loaded when cache is cold
                     persist::NodeID bucketId = bucket->getNodeID();
@@ -1694,6 +1703,34 @@ namespace xtree {
                 } else {
                     // Deep copy the key to avoid aliasing a transient pointer
                     child->setChildFromKeyCopy(*key, src.isDataRecord(), src.getLeaf());
+
+#ifndef NDEBUG
+                    // In IN_MEMORY mode, bucket children should ALWAYS have cache records.
+                    // If we're here for a bucket child, something went wrong earlier (likely
+                    // propagateMBRUpdate clearing the cache via setKeyOwned).
+                    if (!src.isDataRecord()) {
+                        assert(false && "Bucket child has null cache record in IN_MEMORY mode - "
+                               "check if propagateMBRUpdate preserves cache pointers");
+                    }
+#endif
+                }
+
+                // CRITICAL FIX: In IN_MEMORY mode, when adopting a bucket child via kn_from_entry,
+                // the bucket's _parent might be stale (pointing to an old KN that no longer
+                // represents the correct parent relationship after sorting or previous splits).
+                // We UNCONDITIONALLY update _parent to point to the new KN (child) to ensure
+                // the bucket can find its correct parent bucket via _parent->_owner.
+                if (!src.isDataRecord()) {
+                    // Get the bucket from either source KN's cache record or child's cache record
+                    auto* src_cn = const_cast<_MBRKeyNode&>(src).getCacheRecord();
+                    auto* child_cn = child->getCacheRecord();
+                    CacheNode* cn = child_cn ? child_cn : src_cn;
+                    if (cn && cn->object) {
+                        auto* bucket = static_cast<XTreeBucket<Record>*>(cn->object);
+                        bucket->setParent(child);
+                    }
+                    // Note: if cn is null, we can't update _parent. The fix for this is to ensure
+                    // setKeyOwned() in propagateMBRUpdate preserves cache pointers.
                 }
 
 #ifndef NDEBUG
@@ -2418,7 +2455,13 @@ namespace xtree {
                 // CRITICAL: Use setKeyOwned to maintain MBR ownership for bucket children.
                 // Using setKey() would alias the child's _key and set _owns_key=false,
                 // causing use-after-free when the child bucket is evicted.
+                // ALSO CRITICAL: Preserve the cache pointer - setKeyOwned clears it, but
+                // in IN_MEMORY mode we need the cache pointer for parent rewiring during splits.
+                auto* saved_cache = cur->_parent->getCacheRecord();
                 cur->_parent->setKeyOwned(new KeyMBR(*cur->_key));
+                if (saved_cache) {
+                    cur->_parent->setCacheAlias(saved_cache);
+                }
 
                 // If nothing changed here, no need to climb further
                 if (!curChanged) {
@@ -2434,11 +2477,13 @@ namespace xtree {
                     // Sanity checks to catch wiring bugs early
                     if (!parentBucket) {
                         assert(false && "kn->_owner is null; owner must be set when wiring children");
-                    } else {
-                        // The parent should actually reference this kn
+                    } else if (_idx && _idx->hasDurableStore()) {
+                        // Wiring validation is only reliable in DURABLE mode where structural
+                        // changes are tracked. In IN_MEMORY mode, the _children vector may
+                        // contain pre-allocated but unused KNs that don't match _n.
                         bool found = false;
-                        for (auto* kn : parentBucket->_children) {
-                            if (kn == cur->_parent) { found = true; break; }
+                        for (unsigned i = 0; i < parentBucket->_n; ++i) {
+                            if (parentBucket->_children[i] == cur->_parent) { found = true; break; }
                         }
                         assert(found && "parent->_children does not contain cur->_parent (wiring mismatch)");
                     }

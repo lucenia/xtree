@@ -1318,6 +1318,9 @@ TEST_F(XTreeDurabilityStressTest, ServerlessFieldScaling) {
         }
     }
 
+    // Print per-field memory breakdown
+    IndexDetails<DataRecord>::printMemoryBreakdown();
+
     // Final stats
     size_t final_rss = getMemoryUsage();
     auto final_mmap = persist::MappingManager::global().getStats();

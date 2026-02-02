@@ -74,6 +74,23 @@ public:
     // Global singleton accessor - lazy initialization, thread-safe
     static MappingManager& global();
 
+    // Per-field memory statistics
+    struct FieldMemoryStats {
+        size_t mmap_bytes = 0;      // Total bytes mapped for this field
+        size_t pin_count = 0;       // Total pins active for this field
+        size_t extent_count = 0;    // Number of extents for this field
+    };
+
+    // Register a file as belonging to a specific field/index
+    // Thread-safe, can be called multiple times (idempotent)
+    void register_file_for_field(const std::string& path, const std::string& field_name);
+
+    // Unregister a file when it's no longer needed
+    void unregister_file(const std::string& path);
+
+    // Get memory breakdown by field
+    std::unordered_map<std::string, FieldMemoryStats> getPerFieldStats() const;
+
     // Pin is a RAII handle for mapped memory
     class Pin {
     public:
@@ -214,10 +231,14 @@ private:
     std::vector<std::pair<std::string, size_t>> find_eviction_candidates(size_t count);
     
     // Create a new mmap window
-    std::unique_ptr<MappingExtent> create_extent(const FileHandle& fh, 
-                                                  size_t file_off, 
-                                                  size_t len, 
+    std::unique_ptr<MappingExtent> create_extent(const FileHandle& fh,
+                                                  size_t file_off,
+                                                  size_t len,
                                                   bool writable);
+
+    // Per-field tracking (path -> field_name)
+    mutable std::mutex field_map_mutex_;
+    std::unordered_map<std::string, std::string> path_to_field_;
 };
 
 } // namespace persist

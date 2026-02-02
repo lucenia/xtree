@@ -132,7 +132,7 @@ public:
     // use-after-free when parent nodes are temporarily unpinned.
     Node* add(const Id& id, T* object) {
         // Default: cache owns the object and will delete it on eviction/clear
-        return add(id, object, true);
+        return add(id, object, true, "");
     }
 
     // O(1) add with explicit ownership control
@@ -140,14 +140,22 @@ public:
     // owns_object=false: cache does NOT own object, won't delete (mmap'd memory)
     // NOTE: Does NOT automatically evict - see add() comment for rationale
     Node* add(const Id& id, T* object, bool owns_object) {
+        return add(id, object, owns_object, "");
+    }
+
+    // O(1) add with ownership control and optional field_name for per-index tracking
+    // field_name: Optional field/index name for per-field memory attribution
+    Node* add(const Id& id, T* object, bool owns_object, const std::string& field_name) {
         size_t shardIdx = getShardIndex(id);
         auto& shard = *_shards[shardIdx];
         Node* node = shard.add(id, object, owns_object);
 
         if (node) {
+            size_t objSize = 0;
+
             // Track memory usage (only if budget is enabled)
             if (_maxMemory.load(std::memory_order_relaxed) > 0) {
-                size_t objSize = _memorySizer(object);
+                objSize = _memorySizer(object);
                 _currentMemory.fetch_add(objSize, std::memory_order_relaxed);
             }
 
@@ -155,6 +163,14 @@ public:
             if (_useGlobalObjMap) {
                 std::lock_guard<std::mutex> lock(_globalMapMtx);
                 _globalObjMap[object] = shardIdx;
+            }
+
+            // Track per-field memory if field_name is specified
+            if (!field_name.empty()) {
+                if (objSize == 0) objSize = _memorySizer(object);  // Calculate if not already done
+                std::lock_guard<std::mutex> lock(_fieldMemoryMtx);
+                _fieldMemory[field_name] += objSize;
+                _objToField[object] = field_name;
             }
 
             // NOTE: Do NOT evict here - it's unsafe during tree traversal
@@ -169,21 +185,36 @@ public:
     // If id doesn't exist, creates new node with objIfAbsent, pins it, and returns it
     // NOTE: Does NOT automatically evict - see add() comment for rationale
     AcquireResult acquirePinned(const Id& id, T* objIfAbsent) {
+        return acquirePinned(id, objIfAbsent, "");
+    }
+
+    // O(1) atomic get-or-create with field_name for per-index tracking
+    AcquireResult acquirePinned(const Id& id, T* objIfAbsent, const std::string& field_name) {
         size_t shardIdx = getShardIndex(id);
         auto& shard = *_shards[shardIdx];
         AcquireResult result = shard.acquirePinned(id, objIfAbsent);
 
         // Track memory and global map if newly created
         if (result.created && result.node) {
+            size_t objSize = 0;
+
             // Track memory usage (only if budget is enabled)
             if (_maxMemory.load(std::memory_order_relaxed) > 0) {
-                size_t objSize = _memorySizer(result.node->object);
+                objSize = _memorySizer(result.node->object);
                 _currentMemory.fetch_add(objSize, std::memory_order_relaxed);
             }
 
             if (_useGlobalObjMap) {
                 std::lock_guard<std::mutex> lock(_globalMapMtx);
                 _globalObjMap[result.node->object] = shardIdx;
+            }
+
+            // Track per-field memory if field_name is specified
+            if (!field_name.empty()) {
+                if (objSize == 0) objSize = _memorySizer(result.node->object);
+                std::lock_guard<std::mutex> lock(_fieldMemoryMtx);
+                _fieldMemory[field_name] += objSize;
+                _objToField[result.node->object] = field_name;
             }
         }
 
@@ -237,9 +268,11 @@ public:
         T* object = shard.removeById(id);
 
         if (object) {
+            size_t objSize = 0;
+
             // Decrement memory usage (only if budget is enabled)
             if (_maxMemory.load(std::memory_order_relaxed) > 0) {
-                size_t objSize = _memorySizer(object);
+                objSize = _memorySizer(object);
                 _currentMemory.fetch_sub(objSize, std::memory_order_relaxed);
             }
 
@@ -247,6 +280,24 @@ public:
             if (_useGlobalObjMap) {
                 std::lock_guard<std::mutex> lock(_globalMapMtx);
                 _globalObjMap.erase(object);
+            }
+
+            // Decrement per-field memory if tracked
+            {
+                std::lock_guard<std::mutex> lock(_fieldMemoryMtx);
+                auto it = _objToField.find(object);
+                if (it != _objToField.end()) {
+                    if (objSize == 0) objSize = _memorySizer(object);
+                    auto field_it = _fieldMemory.find(it->second);
+                    if (field_it != _fieldMemory.end()) {
+                        if (field_it->second >= objSize) {
+                            field_it->second -= objSize;
+                        } else {
+                            field_it->second = 0;
+                        }
+                    }
+                    _objToField.erase(it);
+                }
             }
         }
 
@@ -259,6 +310,24 @@ public:
         // Only calculate memory if budget is enabled (avoid virtual call overhead)
         const bool trackMemory = _maxMemory.load(std::memory_order_relaxed) > 0;
         size_t objSize = trackMemory ? _memorySizer(object) : 0;
+
+        // Helper lambda to decrement per-field memory
+        auto decrementFieldMemory = [this, object, &objSize]() {
+            std::lock_guard<std::mutex> lock(_fieldMemoryMtx);
+            auto it = _objToField.find(object);
+            if (it != _objToField.end()) {
+                if (objSize == 0) objSize = _memorySizer(object);
+                auto field_it = _fieldMemory.find(it->second);
+                if (field_it != _fieldMemory.end()) {
+                    if (field_it->second >= objSize) {
+                        field_it->second -= objSize;
+                    } else {
+                        field_it->second = 0;
+                    }
+                }
+                _objToField.erase(it);
+            }
+        };
 
         if (_useGlobalObjMap) {
             // 1) Read shard index under the global map lock
@@ -280,6 +349,9 @@ public:
                 }
                 std::lock_guard<std::mutex> g(_globalMapMtx);
                 _globalObjMap.erase(object);
+
+                // Decrement per-field memory
+                decrementFieldMemory();
             }
             return removed;
         } else {
@@ -289,6 +361,8 @@ public:
                     if (trackMemory) {
                         _currentMemory.fetch_sub(objSize, std::memory_order_relaxed);
                     }
+                    // Decrement per-field memory
+                    decrementFieldMemory();
                     return true;
                 }
             }
@@ -316,8 +390,9 @@ public:
             if (evicted) {
                 // Decrement memory usage (only if budget is enabled)
                 if (evicted->object) {
+                    size_t objSize = 0;
                     if (trackMemory) {
-                        size_t objSize = _memorySizer(evicted->object);
+                        objSize = _memorySizer(evicted->object);
                         _currentMemory.fetch_sub(objSize, std::memory_order_relaxed);
                     }
 
@@ -325,6 +400,24 @@ public:
                     if (_useGlobalObjMap) {
                         std::lock_guard<std::mutex> lock(_globalMapMtx);
                         _globalObjMap.erase(evicted->object);
+                    }
+
+                    // Decrement per-field memory if tracked
+                    {
+                        std::lock_guard<std::mutex> lock(_fieldMemoryMtx);
+                        auto it = _objToField.find(evicted->object);
+                        if (it != _objToField.end()) {
+                            if (objSize == 0) objSize = _memorySizer(evicted->object);
+                            auto field_it = _fieldMemory.find(it->second);
+                            if (field_it != _fieldMemory.end()) {
+                                if (field_it->second >= objSize) {
+                                    field_it->second -= objSize;
+                                } else {
+                                    field_it->second = 0;
+                                }
+                            }
+                            _objToField.erase(it);
+                        }
                     }
                 }
                 return evicted;
@@ -402,6 +495,13 @@ public:
             std::lock_guard<std::mutex> lock(_globalMapMtx);
             _globalObjMap.clear();
         }
+
+        // Reset per-field memory tracking
+        {
+            std::lock_guard<std::mutex> lock(_fieldMemoryMtx);
+            _fieldMemory.clear();
+            _objToField.clear();
+        }
     }
 
     // Stats for monitoring
@@ -429,6 +529,13 @@ public:
         }
 
         return stats;
+    }
+
+    // Get per-field cache memory breakdown
+    // Returns map of field_name -> memory bytes used by that field's cache entries
+    std::unordered_map<std::string, size_t> getPerFieldMemory() const {
+        std::lock_guard<std::mutex> lock(_fieldMemoryMtx);
+        return _fieldMemory;  // Return a copy
     }
 
     // Detailed stats showing type breakdown and pin counts
@@ -518,6 +625,11 @@ private:
     bool _useGlobalObjMap;
     std::unordered_map<T*, size_t> _globalObjMap;
     mutable std::mutex _globalMapMtx;
+
+    // Per-field memory tracking for multi-index memory attribution
+    std::unordered_map<std::string, size_t> _fieldMemory;  // field_name -> bytes
+    std::unordered_map<T*, std::string> _objToField;       // object -> field_name
+    mutable std::mutex _fieldMemoryMtx;
 
     // Get shard index for an ID
     size_t getShardIndex(const Id& id) const {

@@ -58,6 +58,12 @@ namespace xtree {
         // thisCacheNode must always correspond to subTree, not the original root
         CacheNode* currentCacheNode = thisCacheNode;
 
+        // OPTIMIZATION: Check if we can trust _cache_ptr directly
+        // When eviction is disabled (getMaxMemory() == 0), pointers stored in _MBRKeyNode
+        // cannot become stale because no entries are ever evicted from the cache.
+        // This allows us to skip the O(1) cache lookup at each level of descent.
+        const bool can_trust_cache_ptrs = (this->_idx->getCache().getMaxMemory() == 0);
+
         // traverse to a leaf level
         while(!subTree->isLeaf()) {
             subTree = subTree->chooseSubtree(cachedRecord);
@@ -68,6 +74,18 @@ namespace xtree {
             // CRITICAL FIX: Update currentCacheNode to track the cache node for subTree
             // subTree->_parent is the _MBRKeyNode in the parent bucket that references subTree.
             // Its getCacheRecord() returns the cache node for subTree (set by setCacheAlias during load).
+
+            // FAST PATH: When eviction disabled, trust _cache_ptr directly
+            // This eliminates O(depth) cache lookups per insertion when memory budget is unlimited.
+            if (can_trust_cache_ptrs && subTree->_parent) {
+                auto* parentKN = subTree->_parent;
+                if (parentKN->getCacheRecord()) {
+                    currentCacheNode = parentKN->getCacheRecord();
+                    continue;  // Skip the slow cache lookup
+                }
+            }
+
+            // SLOW PATH: With eviction enabled, validate via cache lookup
             // SAFETY: When eviction is possible, getCacheRecord() may return dangling pointer.
             // Always use find() to get a validated cache node.
             if (subTree->_parent && subTree->hasNodeID()) {
@@ -116,6 +134,17 @@ namespace xtree {
 #ifndef NDEBUG
         assert(this->_idx && "insertHere requires valid index context");
 #endif
+
+        // OPTIMIZATION: Persist data record ONCE before any bucket logic
+        // This unifies the persistence path that was previously duplicated in
+        // basicInsert() and split(). persist_data_record() is idempotent via
+        // hasNodeID() check, so safe to call unconditionally here.
+        if (cachedRecord && cachedRecord->object && cachedRecord->object->isDataNode()) {
+            using Alloc = XAlloc<RecordType>;
+            if constexpr (Alloc::template has_wire_methods<RecordType>::value) {
+                Alloc::persist_data_record(this->_idx, static_cast<RecordType*>(cachedRecord->object));
+            }
+        }
 
         // Try to insert locally first
         if (this->basicInsert(cachedRecord)) {
@@ -166,7 +195,10 @@ namespace xtree {
                     kn->setDurableBucketChild(stable_mbr, current_bucket->getNodeID(), current_bucket->_leaf);
                     if (thisCacheNode) kn->setCacheAlias(thisCacheNode);
 #ifndef NDEBUG
-                    assert(kn->getNodeID() == current_bucket->getNodeID());
+                    // Verify KN→NodeID parity (only in DURABLE mode)
+                    if (this->_idx->hasDurableStore()) {
+                        assert(kn->getNodeID() == current_bucket->getNodeID());
+                    }
 #endif
                 } else if (!current_bucket->_parent && current_bucket->_idx) {
                     // Root case: update root identity using canonical cache key
@@ -190,8 +222,8 @@ namespace xtree {
 #endif
 
 #ifndef NDEBUG
-                // Sibling NodeID dup detection
-                if (parent_after) {
+                // Sibling NodeID dup detection (only in DURABLE mode)
+                if (this->_idx->hasDurableStore() && parent_after) {
                     unsigned dups = 0;
                     for (unsigned i = 0; i < parent_after->_n; ++i) {
                         auto* pkn = parent_after->_kn(i);
@@ -202,7 +234,10 @@ namespace xtree {
                     }
                     assert(dups == 1 && "Sibling NodeID collision detected under parent");
                 }
-                assert(!current_bucket->_parent || current_bucket->_parent->getNodeID() == current_bucket->getNodeID());
+                // Verify KN→NodeID parity (only in DURABLE mode)
+                if (this->_idx->hasDurableStore()) {
+                    assert(!current_bucket->_parent || current_bucket->_parent->getNodeID() == current_bucket->getNodeID());
+                }
 #endif
             }
 
@@ -248,18 +283,9 @@ namespace xtree {
 
         // otherwise just insert the record (can be a DataRecord or another XTreeBucket (internal node)
 
-        // For DURABLE mode: persist DataRecords to .xd files before inserting
-        // This ensures they have a NodeID that can be stored in the leaf bucket
-        // Only do this for types that support persistence (have wire_size, to_wire, etc.)
-        if (cachedRecord && cachedRecord->object && cachedRecord->object->isDataNode()) {
-            using Alloc = XAlloc<RecordType>;
-            // Extra safety: compile-time check for wire methods
-            if constexpr (Alloc::template has_wire_methods<RecordType>::value) {
-                Alloc::persist_data_record(this->_idx, static_cast<RecordType*>(cachedRecord->object));
-            }
-            // SFINAE already makes persist_data_record a no-op for types without wire methods,
-            // but if constexpr provides an extra layer of safety and clarity
-        }
+        // NOTE: Data record persistence is now handled in insertHere() before calling basicInsert().
+        // This unifies the persistence path and ensures records are persisted exactly once,
+        // regardless of whether the bucket has room (basicInsert succeeds) or needs split.
 
 #ifndef NDEBUG
         // Debug assertions to catch invalid cachedRecord before kn() call
@@ -584,16 +610,10 @@ namespace xtree {
         }
 #endif
 
-        // CRITICAL FIX: Ensure durable DataRecords get a NodeID before we wire them in
-        // Without this, split path inserts have invalid NodeIDs (0) and disappear after recovery
-        if (insertingCN && insertingCN->object && insertingCN->object->isDataNode()) {
-            using Alloc = XAlloc<RecordType>;
-            // Only persist for types that support persistence (have wire methods)
-            if constexpr (Alloc::template has_wire_methods<RecordType>::value) {
-                Alloc::persist_data_record(this->_idx, static_cast<RecordType*>(insertingCN->object));
-            }
-        }
-        
+        // NOTE: Data record persistence is now handled in insertHere() before calling split().
+        // The record already has a valid NodeID by the time we reach this point.
+        // This unifies persistence in one place and eliminates the duplicated code path.
+
         // add the new key to this bucket (so it will be included when we split, or when
         // we turn into a supernode)
 #ifndef NDEBUG
@@ -1185,11 +1205,14 @@ namespace xtree {
 
         // Step 4: Insert both children into the new root
 #ifndef NDEBUG
-        // Sanity check: Both children must have valid NodeIDs before insertion
-        assert(this->hasNodeID() && this->getNodeID().valid() &&
-               "Left child (original root) must have valid NodeID during splitRoot");
-        assert(splitBucket->hasNodeID() && splitBucket->getNodeID().valid() &&
-               "Right child (split bucket) must have valid NodeID during splitRoot");
+        // Sanity check: In DURABLE mode, both children must have valid NodeIDs before insertion
+        // In IN_MEMORY mode, NodeIDs are not used (buckets are identified by pointer)
+        if (this->_idx->hasDurableStore()) {
+            assert(this->hasNodeID() && this->getNodeID().valid() &&
+                   "Left child (original root) must have valid NodeID during splitRoot");
+            assert(splitBucket->hasNodeID() && splitBucket->getNodeID().valid() &&
+                   "Right child (split bucket) must have valid NodeID during splitRoot");
+        }
 
         // Both children (original root and split bucket) must agree on leaf-ness
         // They can be leaf buckets (first root split) or internal buckets (cascade split)
@@ -1233,10 +1256,19 @@ namespace xtree {
                       << std::hex << rootBucket->_key->debug_area_value() << std::dec << std::endl;
         }
 
-        // Use a stable copy of the MBR to avoid aliasing/UAF
-        KeyMBR stable_mbr = *this->_key;
-        left_kn->setDurableBucketChild(stable_mbr, this->getNodeID(), this->_leaf);
-        left_kn->setCacheAlias(thisCacheNode);
+        // Initialize left child KN based on persistence mode
+        const bool is_durable = this->_idx && this->_idx->hasDurableStore();
+        if (is_durable) {
+            // DURABLE mode: use setDurableBucketChild which copies MBR and stores NodeID
+            KeyMBR stable_mbr = *this->_key;
+            left_kn->setDurableBucketChild(stable_mbr, this->getNodeID(), this->_leaf);
+            left_kn->setCacheAlias(thisCacheNode);
+        } else {
+            // IN_MEMORY mode: use setRecord to alias the cache node, then set type flags
+            left_kn->setRecord(thisCacheNode);
+            left_kn->setDataRecord(false);  // This is a bucket, not data
+            left_kn->setLeaf(this->_leaf);
+        }
         left_kn->_owner = rootBucket;
         this->setParent(left_kn);
 
@@ -1253,8 +1285,17 @@ namespace xtree {
                   << std::hex << rootBucket->_key->debug_area_value() << std::dec
                   << " valid=" << rootBucket->_key->debug_check_area() << std::endl;
 
-        right_kn->setDurableBucketChild(*splitBucket->_key, splitBucket->getNodeID(), splitBucket->_leaf);
-        right_kn->setCacheAlias(cachedSplitBucket);
+        // Initialize right child KN based on persistence mode
+        if (is_durable) {
+            // DURABLE mode: use setDurableBucketChild which copies MBR and stores NodeID
+            right_kn->setDurableBucketChild(*splitBucket->_key, splitBucket->getNodeID(), splitBucket->_leaf);
+            right_kn->setCacheAlias(cachedSplitBucket);
+        } else {
+            // IN_MEMORY mode: use setRecord to alias the cache node, then set type flags
+            right_kn->setRecord(cachedSplitBucket);
+            right_kn->setDataRecord(false);  // This is a bucket, not data
+            right_kn->setLeaf(splitBucket->_leaf);
+        }
         right_kn->_owner = rootBucket;
         splitBucket->setParent(right_kn);
 
@@ -1275,9 +1316,11 @@ namespace xtree {
         assert(this->_parent         == left_kn  && "Left bucket parent must be left_kn");
         assert(splitBucket->_parent  == right_kn && "Right bucket parent must be right_kn");
 
-        // Verify KN→NodeID parity
-        assert(left_kn->hasNodeID()  && left_kn->getNodeID()  == this->getNodeID());
-        assert(right_kn->hasNodeID() && right_kn->getNodeID() == splitBucket->getNodeID());
+        // Verify KN→NodeID parity (only in DURABLE mode where NodeIDs are used)
+        if (this->_idx->hasDurableStore()) {
+            assert(left_kn->hasNodeID()  && left_kn->getNodeID()  == this->getNodeID());
+            assert(right_kn->hasNodeID() && right_kn->getNodeID() == splitBucket->getNodeID());
+        }
 #endif
 
         // Debug: Check rootBucket->_key state before recalculateMBR
@@ -1397,28 +1440,44 @@ namespace xtree {
         splitBucket->markDirty();
 
         // Step 3: Wire right sibling into parent (structural, no insertHere)
-        // Use NodeID-based matching instead of pointer-based (post-reallocation safe)
+        // Use NodeID-based matching in DURABLE mode, or cache record matching in IN_MEMORY mode
         int left_idx = -1;
+        const bool use_nodeid_matching = this->_idx->hasDurableStore();
+
         for (unsigned i = 0; i < parent->_n; ++i) {
             auto* kn = parent->_kn(i);
             if (!kn || kn->isDataRecord()) continue;
-            if (kn->hasNodeID()) {
-                if (kn->getNodeID() == this->getNodeID()) {
+
+            if (use_nodeid_matching) {
+                // DURABLE mode: match by NodeID
+                if (kn->hasNodeID() && kn->getNodeID() == this->getNodeID()) {
                     left_idx = static_cast<int>(i);
                     break;
                 }
-            } else if (this->_parent && !kn->hasNodeID() && kn == this->_parent) { // secondary fallback for mixed/staged states
-                left_idx = static_cast<int>(i);
-                break;
+            } else {
+                // IN_MEMORY mode: match by cache record pointer or parent pointer
+                if (kn == this->_parent) {
+                    left_idx = static_cast<int>(i);
+                    break;
+                }
+                // Fallback: match by cache record pointing to this bucket
+                auto* cn = kn->getCacheRecord();
+                if (cn && cn->object == reinterpret_cast<IRecord*>(this)) {
+                    left_idx = static_cast<int>(i);
+                    break;
+                }
             }
         }
+
         assert(left_idx >= 0 && "Left child's KN not found in parent");
 
 #ifndef NDEBUG
-        // Assert uniqueness: no other child should have the same NodeID
-        for (unsigned j = left_idx + 1; j < parent->_n; ++j) {
-            assert(!(parent->_kn(j)->hasNodeID() && parent->_kn(j)->getNodeID() == this->getNodeID()) &&
-                   "duplicate child NodeID under same parent");
+        // Assert uniqueness: no other child should have the same NodeID (only in DURABLE mode)
+        if (use_nodeid_matching) {
+            for (unsigned j = left_idx + 1; j < parent->_n; ++j) {
+                assert(!(parent->_kn(j)->hasNodeID() && parent->_kn(j)->getNodeID() == this->getNodeID()) &&
+                       "duplicate child NodeID under same parent");
+            }
         }
 #endif
 
@@ -1477,25 +1536,28 @@ namespace xtree {
 #endif
 
 #ifndef NDEBUG
-        // Detect NodeID collision between left child and parent (allocator bug)
-        if (parent_after && curLeft->getNodeID() == parent_after->getNodeID()) {
-            trace() << "[ID_COLLISION] left child NodeID matches parent after split publish: "
-                      << curLeft->getNodeID().raw() << "\n";
-            assert(false && "allocator/id-publish must never collide with parent NodeID");
-        }
+        // Detect NodeID collision (only in DURABLE mode where NodeIDs are meaningful)
+        if (this->_idx->hasDurableStore()) {
+            // Detect NodeID collision between left child and parent (allocator bug)
+            if (parent_after && curLeft->getNodeID() == parent_after->getNodeID()) {
+                trace() << "[ID_COLLISION] left child NodeID matches parent after split publish: "
+                          << curLeft->getNodeID().raw() << "\n";
+                assert(false && "allocator/id-publish must never collide with parent NodeID");
+            }
 
-        // Detect NodeID collision between right child and parent (allocator bug)
-        if (parent_after && curRight->getNodeID() == parent_after->getNodeID()) {
-            trace() << "[ID_COLLISION] right child NodeID matches parent after split publish: "
-                      << curRight->getNodeID().raw() << "\n";
-            assert(false && "allocator/id-publish must never collide with parent NodeID");
-        }
+            // Detect NodeID collision between right child and parent (allocator bug)
+            if (parent_after && curRight->getNodeID() == parent_after->getNodeID()) {
+                trace() << "[ID_COLLISION] right child NodeID matches parent after split publish: "
+                          << curRight->getNodeID().raw() << "\n";
+                assert(false && "allocator/id-publish must never collide with parent NodeID");
+            }
 
-        // Detect NodeID collision between siblings (allocator bug)
-        if (curLeft->getNodeID() == curRight->getNodeID()) {
-            trace() << "[ID_COLLISION] left and right siblings have identical NodeIDs: "
-                      << curLeft->getNodeID().raw() << "\n";
-            assert(false && "allocator/id-publish must assign unique NodeIDs to siblings");
+            // Detect NodeID collision between siblings (allocator bug)
+            if (curLeft->getNodeID() == curRight->getNodeID()) {
+                trace() << "[ID_COLLISION] left and right siblings have identical NodeIDs: "
+                          << curLeft->getNodeID().raw() << "\n";
+                assert(false && "allocator/id-publish must assign unique NodeIDs to siblings");
+            }
         }
 #endif
 
@@ -1523,7 +1585,10 @@ namespace xtree {
 #endif
 
 #ifndef NDEBUG
-            assert(left_kn->getNodeID() == curLeft->getNodeID());
+            // Verify NodeID parity (only in DURABLE mode)
+            if (this->_idx->hasDurableStore()) {
+                assert(left_kn->getNodeID() == curLeft->getNodeID());
+            }
 #endif
         }
 
@@ -1549,11 +1614,23 @@ namespace xtree {
         parent->kn(cachedSplitBucket);
 
         // Find the KN that was just created for the sibling
+        // In DURABLE mode, match by NodeID. In IN_MEMORY mode, match by cache pointer.
+        // (use_nodeid_matching already defined above)
         _MBRKeyNode* right_kn = nullptr;
         for (unsigned i = 0; i < parent->_n; ++i) {
             auto* kn = parent->_kn(i);
-            if (kn && !kn->isDataRecord() && kn->hasNodeID()) {
-                if (kn->getNodeID() == curRight->getNodeID()) {
+            if (!kn || kn->isDataRecord()) continue;
+
+            if (use_nodeid_matching) {
+                // DURABLE mode: match by NodeID
+                if (kn->hasNodeID() && kn->getNodeID() == curRight->getNodeID()) {
+                    right_kn = kn;
+                    break;
+                }
+            } else {
+                // IN_MEMORY mode: match by cache record pointer
+                auto* cn = kn->getCacheRecord();
+                if (cn && cn->object == reinterpret_cast<IRecord*>(curRight)) {
                     right_kn = kn;
                     break;
                 }
@@ -1566,7 +1643,9 @@ namespace xtree {
 
 #ifndef NDEBUG
         // Verify wiring
-        assert(right_kn->getNodeID() == curRight->getNodeID());
+        if (this->_idx->hasDurableStore()) {
+            assert(right_kn->getNodeID() == curRight->getNodeID());
+        }
         assert(curRight->_parent == right_kn);
 
         // Verify no self-alias corruption
@@ -1577,15 +1656,17 @@ namespace xtree {
             }
         }
 
-        // Sibling NodeID uniqueness check
-        unsigned dups_right = 0;
-        for (unsigned i = 0; i < parent->_n; ++i) {
-            auto* pkn = parent->_kn(i);
-            if (pkn && !pkn->isDataRecord() && pkn->hasNodeID()) {
-                if (pkn->getNodeID() == curRight->getNodeID()) ++dups_right;
+        // Sibling NodeID uniqueness check (only in DURABLE mode)
+        if (this->_idx->hasDurableStore()) {
+            unsigned dups_right = 0;
+            for (unsigned i = 0; i < parent->_n; ++i) {
+                auto* pkn = parent->_kn(i);
+                if (pkn && !pkn->isDataRecord() && pkn->hasNodeID()) {
+                    if (pkn->getNodeID() == curRight->getNodeID()) ++dups_right;
+                }
             }
+            assert(dups_right == 1 && "Right sibling NodeID collision detected under parent");
         }
-        assert(dups_right == 1 && "Right sibling NodeID collision detected under parent");
 
         // Parent is internal
         assert(!parent->_leaf);
