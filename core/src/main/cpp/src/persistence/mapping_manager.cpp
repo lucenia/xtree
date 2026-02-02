@@ -603,5 +603,54 @@ std::unique_ptr<MappingExtent> MappingManager::create_extent(
     return std::make_unique<MappingExtent>(static_cast<uint8_t*>(addr), len, file_off);
 }
 
+void MappingManager::register_file_for_field(const std::string& path,
+                                              const std::string& field_name) {
+    // Canonicalize the path first
+    std::string cpath = fhr_.canonicalize_path(path);
+
+    std::lock_guard<std::mutex> lock(field_map_mutex_);
+    path_to_field_[cpath] = field_name;
+}
+
+void MappingManager::unregister_file(const std::string& path) {
+    std::string cpath = fhr_.canonicalize_path(path);
+
+    std::lock_guard<std::mutex> lock(field_map_mutex_);
+    path_to_field_.erase(cpath);
+}
+
+std::unordered_map<std::string, MappingManager::FieldMemoryStats>
+MappingManager::getPerFieldStats() const {
+    std::unordered_map<std::string, FieldMemoryStats> result;
+
+    // Lock both mutexes - field_map first, then main mutex
+    std::lock_guard<std::mutex> field_lock(field_map_mutex_);
+    std::lock_guard<std::mutex> map_lock(mu_);
+
+    // Iterate over all file mappings and aggregate by field
+    for (const auto& [path, fmap] : by_file_) {
+        if (!fmap) continue;
+
+        // Look up field name for this path
+        auto field_it = path_to_field_.find(path);
+        std::string field_name = (field_it != path_to_field_.end())
+            ? field_it->second
+            : "_unregistered_";  // Default for files not registered to a field
+
+        FieldMemoryStats& stats = result[field_name];
+
+        // Sum up extents for this file
+        for (const auto& ext : fmap->extents) {
+            if (ext) {
+                stats.mmap_bytes += ext->length;
+                stats.pin_count += ext->pins;
+                stats.extent_count++;
+            }
+        }
+    }
+
+    return result;
+}
+
 } // namespace persist
 } // namespace xtree

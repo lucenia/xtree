@@ -66,7 +66,8 @@ void IndexDetails<Record>::initializeDurableStore(const std::string& data_dir, b
     try {
         // Create the durable runtime which owns all persistence components
         // read_only mode: skip WAL replay for fast serverless reader startup
-        runtime_ = persist::DurableRuntime::open(paths, policy, false, read_only);
+        // Pass field_name for per-index memory tracking
+        runtime_ = persist::DurableRuntime::open(paths, policy, false, read_only, field_name_);
         
         // Create the durable store context (must outlive DurableStore)
         durable_context_ = std::make_unique<persist::DurableContext>(persist::DurableContext{

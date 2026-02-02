@@ -96,19 +96,23 @@ namespace xtree {
             // NEW: Constructor that takes the registries for windowed mmap
             SegmentAllocator(const std::string& data_dir,
                            FileHandleRegistry& fhr,
-                           MappingManager& mm);
-            
+                           MappingManager& mm,
+                           const std::string& field_name = "");
+
             // Constructor with explicit configuration
             SegmentAllocator(const std::string& data_dir,
                            FileHandleRegistry& fhr,
                            MappingManager& mm,
-                           const StorageConfig& config);
-            
+                           const StorageConfig& config,
+                           const std::string& field_name = "");
+
             // Legacy constructor for backward compatibility (creates internal registries)
-            explicit SegmentAllocator(const std::string& data_dir);
-            
+            explicit SegmentAllocator(const std::string& data_dir,
+                                      const std::string& field_name = "");
+
             // Constructor with config (creates internal registries)
-            SegmentAllocator(const std::string& data_dir, const StorageConfig& config);
+            SegmentAllocator(const std::string& data_dir, const StorageConfig& config,
+                           const std::string& field_name = "");
 
             // Destructor - ensures all pins are released before destruction
             ~SegmentAllocator();
@@ -143,6 +147,9 @@ namespace xtree {
             std::string get_file_path(uint32_t file_id, bool is_data_file) const;
             size_t get_segment_size() const { return DEFAULT_SEGMENT_SIZE; }
             MappingManager& get_mapping_manager() { return *mapping_manager_; }
+
+            // Get the field name this allocator is associated with
+            const std::string& get_field_name() const { return field_name_; }
 
             struct Stats { 
                 size_t live_bytes = 0;
@@ -336,6 +343,7 @@ namespace xtree {
             };
             
             std::string data_dir_;
+            std::string field_name_;  // Field/index name for per-field memory tracking
             ClassAllocator allocators_[NUM_CLASSES];
             std::atomic<uint32_t> next_segment_id_{0};
             std::atomic<uint32_t> global_file_seq_{0};  // Only used when !kFilePerSizeClass

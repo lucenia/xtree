@@ -179,11 +179,13 @@ TEST_F(XTreePerformanceTest, BulkInsertions) {
          << " (" << (NUM_POINTS * 1000.0 / duration.count()) << " inserts/second)" << endl;
     
     EXPECT_GT(root->n(), 0);
-    
-    // Clear the static cache to prevent interference with subsequent tests
-    // For performance tests, we can just clear without deleting since the process will exit
-    IndexDetails<DataRecord>::clearCache();
-    
+
+    // NOTE: We do NOT call clearCache() before delete idx because:
+    // - clearCache() deletes cached objects (including the root bucket)
+    // - Then ~IndexDetails() tries to unpin the freed root → use-after-free
+    // The cache is global and shared across tests; each test is responsible for
+    // cleaning up its own index via delete, not clearing the shared cache.
+
     delete idx;
     delete dimLabels;
     
@@ -256,11 +258,11 @@ TEST_F(XTreePerformanceTest, SpatialQueries) {
     for (auto query : queries) {
         delete query;
     }
-    
-    // Clear the static cache to prevent interference with subsequent tests
-    // For performance tests, we can just clear without deleting since the process will exit
-    IndexDetails<DataRecord>::clearCache();
-    
+
+    // NOTE: We do NOT call clearCache() before delete idx because:
+    // - clearCache() deletes cached objects (including the root bucket)
+    // - Then ~IndexDetails() tries to unpin the freed root → use-after-free
+
     delete idx;
     delete dimLabels;
     

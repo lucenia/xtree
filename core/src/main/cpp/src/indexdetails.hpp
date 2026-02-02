@@ -36,6 +36,7 @@
 #include <mutex>
 #include <atomic>
 #include <cassert>
+#include <iomanip>
 
 namespace xtree {
 
@@ -596,6 +597,148 @@ namespace xtree {
 
         const std::string& getFieldName() const {
             return field_name_;
+        }
+
+        // ========== Per-Index Memory Statistics ==========
+
+        // Comprehensive memory stats for this index
+        struct IndexMemoryStats {
+            std::string field_name;
+
+            // MMap memory (from MappingManager)
+            size_t mmap_bytes = 0;
+            size_t mmap_extents = 0;
+            size_t mmap_pins = 0;
+
+            // Cache memory (from ShardedLRUCache)
+            size_t cache_bytes = 0;
+            size_t cache_entries = 0;
+
+            // Segment allocator stats
+            size_t segment_live_bytes = 0;
+            size_t segment_dead_bytes = 0;
+            double segment_fragmentation_pct = 0.0;
+
+            // Total memory for this index
+            size_t total_bytes() const {
+                return mmap_bytes + cache_bytes;
+            }
+        };
+
+        // Get memory stats for this specific index
+        IndexMemoryStats getMemoryStats() const {
+            IndexMemoryStats stats;
+            stats.field_name = field_name_;
+
+            // Get per-field mmap stats from MappingManager
+            auto mmap_stats = persist::MappingManager::global().getPerFieldStats();
+            auto it = mmap_stats.find(field_name_);
+            if (it != mmap_stats.end()) {
+                stats.mmap_bytes = it->second.mmap_bytes;
+                stats.mmap_extents = it->second.extent_count;
+                stats.mmap_pins = it->second.pin_count;
+            }
+
+            // Get per-field cache stats from ShardedLRUCache
+            auto cache_stats = getCache().getPerFieldMemory();
+            auto cache_it = cache_stats.find(field_name_);
+            if (cache_it != cache_stats.end()) {
+                stats.cache_bytes = cache_it->second;
+            }
+
+            // Get segment stats if we have a durable runtime
+            if (runtime_) {
+                auto seg_stats = runtime_->allocator().get_total_stats();
+                stats.segment_live_bytes = seg_stats.live_bytes;
+                stats.segment_dead_bytes = seg_stats.dead_bytes;
+                stats.segment_fragmentation_pct = seg_stats.fragmentation() * 100.0;
+            }
+
+            return stats;
+        }
+
+        // Get memory stats for all indexes
+        static std::vector<IndexMemoryStats> getAllIndexStats() {
+            std::vector<IndexMemoryStats> all_stats;
+            all_stats.reserve(indexes.size());
+
+            for (auto* idx : indexes) {
+                if (idx) {
+                    all_stats.push_back(idx->getMemoryStats());
+                }
+            }
+
+            return all_stats;
+        }
+
+        // Print per-index memory breakdown (for debugging/monitoring)
+        static void printMemoryBreakdown() {
+            std::cout << "\n=== Per-Index Memory Breakdown ===" << std::endl;
+
+            // Get raw per-field mmap stats directly from MappingManager
+            auto raw_mmap_stats = persist::MappingManager::global().getPerFieldStats();
+
+            std::cout << "| Field | MMap (MB) | Cache (MB) | Segments (MB) | Total (MB) |" << std::endl;
+            std::cout << "|-------|-----------|------------|---------------|------------|" << std::endl;
+
+            auto all_stats = getAllIndexStats();
+            size_t total_mmap = 0, total_cache = 0, total_seg = 0;
+            size_t fields_with_zero = 0;
+            size_t fields_with_memory = 0;
+
+            for (const auto& stats : all_stats) {
+                // Look up mmap stats directly from raw_mmap_stats for this field
+                size_t mmap_bytes = 0;
+                auto it = raw_mmap_stats.find(stats.field_name);
+                if (it != raw_mmap_stats.end()) {
+                    mmap_bytes = it->second.mmap_bytes;
+                }
+
+                size_t mmap_mb = mmap_bytes / (1024 * 1024);
+                size_t cache_mb = stats.cache_bytes / (1024 * 1024);
+                size_t seg_mb = stats.segment_live_bytes / (1024 * 1024);
+                size_t total_mb = (mmap_bytes + stats.cache_bytes) / (1024 * 1024);
+
+                // Only show fields with non-zero memory (in MB) to reduce noise
+                if (mmap_mb > 0 || cache_mb > 0 || seg_mb > 0) {
+                    std::cout << "| " << stats.field_name
+                              << " | " << mmap_mb
+                              << " | " << cache_mb
+                              << " | " << seg_mb
+                              << " | " << total_mb
+                              << " |" << std::endl;
+                    fields_with_memory++;
+                } else {
+                    fields_with_zero++;
+                }
+
+                total_mmap += mmap_bytes;
+                total_cache += stats.cache_bytes;
+                total_seg += stats.segment_live_bytes;
+            }
+
+            // Check for unregistered memory
+            auto unreg_it = raw_mmap_stats.find("_unregistered_");
+            if (unreg_it != raw_mmap_stats.end() && unreg_it->second.mmap_bytes > 0) {
+                std::cout << "| _unregistered_ | "
+                          << (unreg_it->second.mmap_bytes / (1024 * 1024))
+                          << " | 0 | 0 | "
+                          << (unreg_it->second.mmap_bytes / (1024 * 1024))
+                          << " |" << std::endl;
+                total_mmap += unreg_it->second.mmap_bytes;
+            }
+
+            std::cout << "|-------|-----------|------------|---------------|------------|" << std::endl;
+            std::cout << "| Total | "
+                      << (total_mmap / (1024 * 1024))
+                      << " | " << (total_cache / (1024 * 1024))
+                      << " | " << (total_seg / (1024 * 1024))
+                      << " | " << ((total_mmap + total_cache) / (1024 * 1024))
+                      << " |" << std::endl;
+
+            if (fields_with_zero > 0) {
+                std::cout << "(" << fields_with_zero << " fields with evicted/zero memory not shown)" << std::endl;
+            }
         }
 
 //        IRecord* getCachedNode( UniqueId recordAddress ) { return NULL; }

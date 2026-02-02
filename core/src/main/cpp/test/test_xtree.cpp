@@ -141,11 +141,11 @@ TEST_F(XTreeBucketTest, MockBucketInsertion) {
     
     // Verify insertion
     EXPECT_EQ(root->n(), 1);
-    
-    // Clean up: cache manages the nodes now
-    // Just clean up the mock objects themselves
+
+    // Clean up: mockKey is NOT managed by cache (we own it)
+    // But mock is in the cache - cache will delete it in TearDown via clearCache()
     delete mockKey;
-    delete mock;
+    // NOTE: Do NOT delete mock - it's owned by the cache now
 }
 
 TEST_F(XTreeBucketTest, MockMultipleInsertions) {
@@ -190,14 +190,12 @@ TEST_F(XTreeBucketTest, MockMultipleInsertions) {
 
     EXPECT_EQ(root->n(), NUM_RECORDS);
 
-    // Clean up
-    // Cache manages the nodes - no need to delete them
+    // Clean up: mockKeys are NOT managed by cache (we own them)
+    // But mocks are in the cache - cache will delete them in TearDown via clearCache()
     for (auto* mockKey : mockKeys) {
         delete mockKey;
     }
-    for (auto* mock : mocks) {
-        delete mock;
-    }
+    // NOTE: Do NOT delete mocks - they're owned by the cache now
 }
 
 TEST_F(XTreeBucketTest, MockInsertionWithSplitScenario) {
@@ -242,13 +240,11 @@ TEST_F(XTreeBucketTest, MockInsertionWithSplitScenario) {
     // After many insertions, the tree structure should have grown
     EXPECT_GE(root->n(), 1);  // Root should have at least one child
     EXPECT_GT(root->memoryUsage(), sizeof(XTreeBucket<MockRecord>));
-    
-    // Clean up
-    // Cache manages the nodes - no need to delete them
+
+    // Clean up: mockKeys are NOT managed by cache (we own them)
+    // But mocks are in the cache - cache will delete them in TearDown via clearCache()
     for (auto* mockKey : mockKeys) {
         delete mockKey;
     }
-    for (auto* mock : mocks) {
-        delete mock;
-    }
+    // NOTE: Do NOT delete mocks - they're owned by the cache now
 }
