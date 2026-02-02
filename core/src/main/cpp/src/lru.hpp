@@ -29,13 +29,21 @@ namespace xtree {
     template<typename T, typename Id, LRUCacheDeleteType Del>
     typename LRUCache<T, Id, Del>::Node*
     LRUCache<T, Id, Del>::add(const Id& id, T* object) {
+        // Default: cache owns the object and will delete it on eviction/clear
+        return add(id, object, true);
+    }
+
+    // Add with explicit ownership control
+    template<typename T, typename Id, LRUCacheDeleteType Del>
+    typename LRUCache<T, Id, Del>::Node*
+    LRUCache<T, Id, Del>::add(const Id& id, T* object, bool owns_object) {
         std::unique_lock<std::shared_mutex> lock(_mtx);
 
         // Prevent duplicates
         assert(_mapId.find(id) == _mapId.end() && "Duplicate id in LRUCache");
         assert(_mapObj.find(object) == _mapObj.end() && "Duplicate object* in LRUCache");
 
-        Node* node = new Node(id, object, _first);
+        Node* node = new Node(id, object, _first, owns_object);
 
         // Link into LRU head
         if (_first) _first->prev = node;

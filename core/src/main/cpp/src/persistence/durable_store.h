@@ -98,6 +98,10 @@ namespace xtree {
             // Get segment utilization statistics (wrapper for internal SegmentAllocator)
             SegmentAllocator::SegmentUtilization get_segment_utilization() const;
 
+            // Access to SegmentAllocator for lazy remapping control
+            SegmentAllocator& get_segment_allocator() { return ctx_.alloc; }
+            const SegmentAllocator& get_segment_allocator() const { return ctx_.alloc; }
+
         private:
             // Internal helper: resolve OTEntry for a NodeID, handling uncommitted visibility
             const OTEntry* resolve_entry(NodeID id, bool& is_uncommitted) const noexcept;

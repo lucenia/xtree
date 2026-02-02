@@ -109,7 +109,10 @@ namespace xtree {
             
             // Constructor with config (creates internal registries)
             SegmentAllocator(const std::string& data_dir, const StorageConfig& config);
-            
+
+            // Destructor - ensures all pins are released before destruction
+            ~SegmentAllocator();
+
             Allocation allocate(size_t size, NodeKind kind = NodeKind::Internal);
             void       free(Allocation& a);  // Non-const now (moves the pin)
             void       close_all();  // Close all segments and mappings for clean shutdown
@@ -117,6 +120,14 @@ namespace xtree {
             // Read-only mode for serverless readers
             void set_read_only(bool read_only) { read_only_ = read_only; }
             bool is_read_only() const { return read_only_; }
+
+            // Lazy remapping support for multi-field memory scaling
+            // Release pins from segments not accessed within threshold_ns (default 60s)
+            // Returns number of pins released
+            size_t release_cold_pins(uint64_t threshold_ns = 60000000000ULL);
+
+            // Get count of currently pinned segments (for diagnostics)
+            size_t get_pinned_segment_count() const;
             
             // PERFORMANCE: O(1) lookup using segment table
             FORCE_INLINE void* get_ptr(const Allocation& a) noexcept;
@@ -197,9 +208,13 @@ namespace xtree {
                 uint64_t base_offset;     // File-relative base byte offset
                 size_t   capacity;        // Bytes in this segment
                 size_t   used;            // Bytes used (for bump allocation)
-                void*    base_vaddr = nullptr;  // Stable virtual address for O(1) lookups
-                // Keep pin alive to ensure memory stays mapped
-                MappingManager::Pin pin;  // By value - no heap allocation
+                void*    base_vaddr = nullptr;  // Virtual address (valid only when pin is valid)
+
+                // Lazy remapping support: pin can be released to allow mmap eviction
+                MappingManager::Pin pin;  // RAII handle - can be empty if evicted
+                mutable std::mutex remap_mutex;  // Protects remapping slow path
+                bool writable = true;     // For remapping with correct permissions
+                std::atomic<uint64_t> last_access_ns{0};  // LRU tracking for pin release
                 
                 // Bitmap allocation fields
                 uint32_t blocks = 0;              // capacity / class_size
@@ -346,10 +361,14 @@ namespace xtree {
             
             // Recovery helpers
             void ensure_seg_table_capacity_locked(ClassAllocator& ca, size_t min_capacity);
-            std::unique_ptr<Segment> map_segment_for_recovery_locked(uint8_t class_id, 
-                                                                     uint32_t file_id, 
+            std::unique_ptr<Segment> map_segment_for_recovery_locked(uint8_t class_id,
+                                                                     uint32_t file_id,
                                                                      uint32_t segment_id,
                                                                      uint64_t offset);
+
+            // Lazy remapping helper - ensures segment is mapped (thread-safe)
+            // Called from get_ptr() slow path when pin has been released
+            void ensure_segment_mapped(Segment* seg);
         };
         
         // INLINE IMPLEMENTATION for hot path performance - REMOVED
@@ -580,40 +599,55 @@ namespace xtree {
         }
         
         // O(1) pointer lookup for regular allocations using segment table
+        // With lazy remapping: if segment's pin was released, we remap on demand
         FORCE_INLINE void* SegmentAllocator::get_ptr(const Allocation& a) noexcept {
             // First try using the pin if it's valid (for special allocations)
             if (a.pin.get()) {
                 return a.pin.get();
             }
-            
+
             // Otherwise use the segment table for O(1) lookup
             if (UNLIKELY(a.class_id >= NUM_CLASSES)) return nullptr;
             auto& ca = allocators_[a.class_id];
-            
+
             // Fast path: lock-free seg_table lookup
             size_t size = ca.seg_table_size.load(std::memory_order_acquire);
             if (UNLIKELY(a.segment_id >= size)) return nullptr;
-            
+
             auto* table = ca.seg_table_root.load(std::memory_order_relaxed);
             if (UNLIKELY(!table)) return nullptr;
-            
+
             Segment* seg = table[a.segment_id].load(std::memory_order_acquire);
             if (UNLIKELY(!seg)) return nullptr;
-            
+
             // Verify file_id match
             if (UNLIKELY(seg->file_id != a.file_id)) return nullptr;
-            
+
+            // LAZY REMAPPING: Check if segment's pin is still valid
+            // If not, we need to remap (slow path)
+            if (UNLIKELY(!seg->pin)) {
+                // Slow path: remap the segment (thread-safe)
+                const_cast<SegmentAllocator*>(this)->ensure_segment_mapped(seg);
+                if (UNLIKELY(!seg->base_vaddr)) return nullptr;
+            }
+
+            // Update last access time for LRU-based pin release
+            using namespace std::chrono;
+            seg->last_access_ns.store(
+                duration_cast<nanoseconds>(high_resolution_clock::now().time_since_epoch()).count(),
+                std::memory_order_relaxed);
+
             // Compute offset
             if (UNLIKELY(a.offset < seg->base_offset)) return nullptr;
             const uint64_t rel = a.offset - seg->base_offset;
-            
+
             // Debug asserts for alignment and size class
             #ifndef NDEBUG
             const size_t class_sz = size_class::kSizes[a.class_id];
             assert((rel % class_sz) == 0 && "Misaligned offset for size class");
             assert(a.length == class_sz && "Allocation size doesn't match size class");
             #endif
-            
+
             // Bounds check
             if (UNLIKELY(seg->capacity < rel || seg->capacity - rel < a.length)) return nullptr;
             

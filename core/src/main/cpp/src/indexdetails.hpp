@@ -163,9 +163,10 @@ namespace xtree {
                 root_cn_ = nullptr;
             }
 
-            // Clear the cache to free all cached nodes
-            // This should help free DataRecords
-            getCache().clear();
+            // NOTE: We do NOT call getCache().clear() here because the cache is global
+            // and shared across all IndexDetails instances. Clearing it would invalidate
+            // entries from other indexes that are still open.
+            // TODO: Implement per-index cache cleanup that only removes this index's entries.
 
             // Clear root references
             root_cache_key_ = 0;
