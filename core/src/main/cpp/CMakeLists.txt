@@ -608,6 +608,8 @@ set(GTEST_SOURCES
     test/test_lru_sharded_stress.cpp  # Sharded LRU cache stress tests
     test/test_cache_policy.cpp  # Cache memory policy tests
     test/test_cache_policy_stress.cpp  # Cache policy stress tests
+    test/test_memory_coordinator.cpp  # Adaptive memory coordinator tests
+    test/test_index_registry.cpp  # Lazy index loading tests
     # Concurrent tests saved for adaptation to new persistence layer
     # test/test_xtree_concurrent_search.cpp
     # test/test_xtree_simple_concurrent.cpp

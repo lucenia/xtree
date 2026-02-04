@@ -39,6 +39,7 @@ obj/
 .idea/
 *.iml
 .vscode/
+.claude/
 # But keep GitHub workflows
 !.github/
 *.swp
