@@ -32,6 +32,7 @@
 #include "persistence/store_interface.h"
 #include "xtree_allocator_traits.hpp"  // For XAlloc
 #include "cache_policy.hpp"  // Cache memory policies
+#include "persistence/memory_coordinator.h"  // Adaptive memory coordination
 #include <memory>
 #include <mutex>
 #include <atomic>
@@ -111,8 +112,15 @@ namespace xtree {
                     break;
             }
             
-            std::cout << "[IndexDetails] Constructor completed for " 
+            std::cout << "[IndexDetails] Constructor completed for "
                       << (mode == PersistenceMode::DURABLE ? "DURABLE" : "IN_MEMORY") << " mode\n";
+
+            // Initialize memory coordinator for DURABLE mode
+            // This ensures adaptive memory budget is active when mmap is in use
+            if (mode == PersistenceMode::DURABLE) {
+                // Touch the singleton to ensure it's initialized with env vars
+                persist::MemoryCoordinator::global();
+            }
 
             // update cache size for each index
    //         for_each(IndexDetails<Record>::indexes.begin(),
@@ -1070,6 +1078,9 @@ namespace xtree {
                       << " from dirty list of " << buckets.size() << " (iteration " << iteration << ")\n";
 #endif
             } // end while loop
+
+            // Tick the memory coordinator at safe points (after flush, no traversal in progress)
+            persist::MemoryCoordinator::global().tick();
         }
 
         /**
